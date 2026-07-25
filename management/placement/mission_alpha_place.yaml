@@ -1,0 +1,47 @@
+# Reference copy of mission_alpha.yaml's placement mapping,
+# kept here per the design doc's repo layout for readability.
+# The authoritative copy submitted to POST /missions is the
+# `placement:` section embedded in mission_defs/mission_alpha.yaml
+# (matching the API's single-document MissionDefinition schema).
+mission: Mission-Alpha
+placement:
+  render01: compute01
+  render02: compute03
+  render03: compute01
+  render04: compute03
+  render05: compute01
+  render06: compute03
+  render07: compute01
+  db01: compute02
+  db02: compute04
+  db03: compute02
+  db04: compute04
+  worker01: compute02
+  worker02: compute04
+  worker03: compute02
+  worker04: compute04
+  worker05: compute02
+  worker06: compute04
+  worker07: compute02
+  worker08: compute04
+  worker09: compute02
+  worker10: compute03
+  worker11: compute04
+  worker12: compute02
+  worker13: compute03
+  worker14: compute04
+  worker15: compute01
+  worker16: compute02
+  worker17: compute03
+  worker18: compute04
+  worker19: compute01
+  worker20: compute02
+  worker21: compute03
+  worker22: compute04
+  worker23: compute01
+  app01: compute02
+  app02: compute03
+  app03: compute04
+  app04: compute02
+  app05: compute03
+  app06: compute04

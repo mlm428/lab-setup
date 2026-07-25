@@ -1,0 +1,38 @@
+# Host capacity inventory for placement validation (core/placement.py) and
+# libvirt connection addresses (clients/libvirt_client.py). Kept in sync
+# with bootstrap/config/hosts.yaml by hand for this prototype (see that
+# file's header comment for the GPU-count adjustment rationale: the source
+# doc's illustrative 2+2=4 GPU table was insufficient for the 7-GPU-VM
+# scenario, so compute01/compute03 were bumped to 4 GPUs each here too).
+#
+# gpu_pci_addresses are placeholders -- bootstrap.py's gpu.discover_gpus()
+# populates the real PCI addresses per host; record them here once known.
+hosts:
+  compute01:
+    address: compute01.cluster.local
+    cpus: 64
+    memory_mb: 262144
+    gpus: 4
+    gpu_pci_addresses: ["0000:81:00.0", "0000:82:00.0", "0000:83:00.0", "0000:84:00.0"]
+    storage_backend: ceph_rbd
+  compute02:
+    address: compute02.cluster.local
+    cpus: 64
+    memory_mb: 262144
+    gpus: 0
+    gpu_pci_addresses: []
+    storage_backend: ceph_rbd
+  compute03:
+    address: compute03.cluster.local
+    cpus: 64
+    memory_mb: 262144
+    gpus: 4
+    gpu_pci_addresses: ["0000:81:00.0", "0000:82:00.0", "0000:83:00.0", "0000:84:00.0"]
+    storage_backend: ceph_rbd
+  compute04:
+    address: compute04.cluster.local
+    cpus: 64
+    memory_mb: 262144
+    gpus: 0
+    gpu_pci_addresses: []
+    storage_backend: ceph_rbd

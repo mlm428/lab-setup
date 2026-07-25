@@ -1,0 +1,33 @@
+# Cluster-wide connection settings for the management service. Values here
+# should stay in sync with bootstrap/config/{hosts,storage}.yaml -- in a
+# real deployment both would be generated from one shared source (a
+# GitOps repo or config-management inventory); for this prototype we keep
+# two small YAMLs in sync by hand rather than build that plumbing.
+
+ovn:
+  nb_connection: "tcp:compute01.cluster.local:6641"
+  integration_bridge: br-int
+
+storage:
+  backend: ceph_rbd          # ceph_rbd | local_qcow2 -- must match hosts' actual setup
+  ceph:
+    conf_path: /etc/ceph/ceph.conf
+    client_id: libvirt
+    pool: mission-images
+    secret_uuid: "5e4b8c1a-9f2d-4e3a-8b7a-1c2d3e4f5a6b"
+    monitors:
+      - name: ceph-mon1
+        port: 6789
+      - name: ceph-mon2
+        port: 6789
+      - name: ceph-mon3
+        port: 6789
+  local_qcow2:
+    dir: /var/lib/libvirt/images
+
+golden_images:
+  # name -> golden snapshot name used for RBD clone-from-snapshot
+  rhel9-db-golden:
+    snapshot: golden-snap
+  rhel9-app-golden:
+    snapshot: golden-snap

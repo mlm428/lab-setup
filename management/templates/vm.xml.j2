@@ -1,0 +1,80 @@
+{#
+  libvirt domain XML template.
+
+  NIC-to-OVN binding: each <interface> is a bridge port on the host's OVN
+  integration bridge (br-int) with a virtualport "openvswitch" interfaceid.
+  That interfaceid MUST equal the name of the OVN logical switch port
+  created for this VM/network (management/services/networking.py creates
+  ports named "<vm_name>-<network_name>", the same convention used below)
+  -- this is what lets ovn-controller bind the OVS port to the correct
+  logical switch/port and enforce isolation between missions, per real
+  OVN+libvirt integration (a plain bridge/VLAN interface, as sketched
+  illustratively in the source design doc, would NOT by itself give OVN
+  logical-switch isolation).
+#}
+<domain type='kvm'>
+  <name>{{ vm_name }}</name>
+  <uuid>{{ uuid }}</uuid>
+  <memory unit='MiB'>{{ memory_mb }}</memory>
+  <currentMemory unit='MiB'>{{ memory_mb }}</currentMemory>
+  <vcpu placement='static'>{{ cpu }}</vcpu>
+  <os>
+    <type arch='x86_64' machine='q35'>hvm</type>
+{%- if vm_type == 'pxe' %}
+    <boot dev='network'/>
+{%- else %}
+    <boot dev='hd'/>
+{%- endif %}
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <cpu mode='host-passthrough' check='none'/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>restart</on_crash>
+  <devices>
+{%- if vm_type == 'linked_clone' %}
+{%- if storage_backend == 'ceph_rbd' %}
+    <disk type='network' device='disk'>
+      <driver name='qemu' type='raw'/>
+      <source protocol='rbd' name='{{ ceph_pool }}/{{ vm_name }}_clone'>
+{%- for mon in ceph_monitors %}
+        <host name='{{ mon.name }}' port='{{ mon.port }}'/>
+{%- endfor %}
+      </source>
+      <auth username='{{ ceph_client_id }}'>
+        <secret type='ceph' uuid='{{ ceph_secret_uuid }}'/>
+      </auth>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+{%- else %}
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='{{ local_qcow2_path }}'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+{%- endif %}
+{%- endif %}
+{%- for iface in interfaces %}
+    <interface type='bridge'>
+      <mac address='{{ iface.mac }}'/>
+      <source bridge='{{ ovn_integration_bridge }}'/>
+      <virtualport type='openvswitch'>
+        <parameters interfaceid='{{ iface.port_name }}'/>
+      </virtualport>
+      <model type='virtio'/>
+    </interface>
+{%- endfor %}
+{%- for gpu in gpu_devices %}
+    <hostdev mode='subsystem' type='pci' managed='yes'>
+      <source>
+        <address domain='0x{{ gpu.domain }}' bus='0x{{ gpu.bus }}' slot='0x{{ gpu.slot }}' function='0x{{ gpu.function }}'/>
+      </source>
+    </hostdev>
+{%- endfor %}
+    <console type='pty'/>
+    <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
+  </devices>
+</domain>

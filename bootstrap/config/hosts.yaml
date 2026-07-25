@@ -1,0 +1,65 @@
+# Inventory of RHEL compute hosts that bootstrap.py will configure, and that
+# the management service's inventory/hosts.yaml (management/inventory/hosts.yaml)
+# schedules missions onto. Keep the two in sync -- capacity numbers here are
+# what the management service trusts when it validates placement.
+#
+# NOTE ON GPU COUNTS: the source design doc's illustrative host table listed
+# only 4 total GPU slots (2 on compute01, 2 on compute03) across the cluster,
+# which is not enough to host the proof-of-concept's 7 GPU VMs. We bumped
+# compute01/compute03 to 4 GPUs each (8 total, 1 spare) so the mission_alpha
+# scenario is actually satisfiable. Treat GPU model/count as environment-
+# specific and confirm against real hardware before a real run (the source
+# doc flags this explicitly as an unknown).
+hosts:
+  compute01:
+    address: compute01.cluster.local
+    role: [libvirt, ovn-controller, ceph-osd]
+    cpus: 64
+    memory_mb: 262144            # 256 GiB
+    gpus: 4                      # e.g. NVIDIA A40, PCI IDs recorded post-discovery
+    numa_nodes: 2
+    storage_backend: ceph_rbd    # ceph_rbd | local_qcow2
+  compute02:
+    address: compute02.cluster.local
+    role: [libvirt, ceph-osd]
+    cpus: 64
+    memory_mb: 262144
+    gpus: 0
+    numa_nodes: 2
+    storage_backend: ceph_rbd
+  compute03:
+    address: compute03.cluster.local
+    role: [libvirt, ovn-controller, ceph-osd]
+    cpus: 64
+    memory_mb: 262144
+    gpus: 4
+    numa_nodes: 2
+    storage_backend: ceph_rbd
+  compute04:
+    address: compute04.cluster.local
+    role: [libvirt, ceph-osd]
+    cpus: 64
+    memory_mb: 262144
+    gpus: 0
+    numa_nodes: 2
+    storage_backend: ceph_rbd
+
+# Ceph monitor endpoints (used by both bootstrap's storage module and the
+# management service's ceph_client.py).
+ceph_monitors:
+  - name: ceph-mon1
+    address: ceph-mon1.cluster.local
+    port: 6789
+  - name: ceph-mon2
+    address: ceph-mon2.cluster.local
+    port: 6789
+  - name: ceph-mon3
+    address: ceph-mon3.cluster.local
+    port: 6789
+
+# OVN central control plane (northbound/southbound DBs). In this prototype
+# we run ovn-northd on one of the compute hosts; for production, split this
+# onto dedicated controller nodes.
+ovn_central:
+  nb_connection: "tcp:compute01.cluster.local:6641"
+  sb_connection: "tcp:compute01.cluster.local:6642"

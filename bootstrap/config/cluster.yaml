@@ -1,0 +1,64 @@
+# Cluster-wide bootstrap configuration. Values here drive bootstrap.py and
+# its modules/*.py. Keep environment-specific overrides in a copy of this
+# file passed via `bootstrap.py --config-dir <dir>`.
+
+cluster_name: mission-compute-cluster
+
+# CPU vendor controls which IOMMU kernel args gpu.py writes.
+# One of: intel | amd
+cpu_vendor: intel
+
+# GRUB kernel command-line fragment appended for IOMMU/VFIO support.
+# gpu.py idempotently ensures these tokens are present in
+# /etc/default/grub GRUB_CMDLINE_LINUX before calling grub2-mkconfig.
+iommu_kernel_args:
+  intel: ["intel_iommu=on", "iommu=pt"]
+  amd: ["amd_iommu=on", "iommu=pt"]
+
+# Kernel modules that must be loaded for PCI/GPU passthrough.
+vfio_modules:
+  - vfio
+  - vfio_iommu_type1
+  - vfio_pci
+
+# OVS bridge names created on every host.
+ovs_bridges:
+  integration: br-int   # OVN integration bridge (plugged by ovn-controller)
+  external: br-ex        # uplink to physical network / provider network
+
+# systemd services bootstrap.py enables and starts, in order.
+services:
+  - libvirtd
+  - openvswitch
+  - ovn-controller
+  - cockpit.socket
+
+# Packages installed via dnf. Split into logical groups purely for
+# readability/logging; packages.py installs them all in one transaction.
+packages:
+  virtualization:
+    - qemu-kvm
+    - libvirt-daemon
+    - libvirt-daemon-driver-qemu
+    - libvirt-client
+    - virt-install
+    - virt-viewer
+    - python3-libvirt        # `import libvirt` for management/clients/libvirt_client.py
+  networking:
+    - openvswitch
+    - openvswitch-ovn-host
+    - NetworkManager-ovs
+  storage:
+    - ceph-common
+    - python3-rados          # `import rados` for management/clients/ceph_client.py
+    - python3-rbd            # `import rbd`   for management/clients/ceph_client.py
+  management_ui:
+    - cockpit
+    - cockpit-machines
+  compliance:
+    - openscap-scanner
+    - scap-security-guide
+
+# STIG profile used by scripts/run_stig_scan.sh (RHEL 9 profile id from
+# scap-security-guide's RHEL9 datastream).
+stig_profile: "xccdf_org.ssgproject.content_profile_stig"

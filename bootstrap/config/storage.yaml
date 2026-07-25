@@ -1,0 +1,32 @@
+# Storage pool configuration used by bootstrap/modules/storage.py to set up
+# each host's libvirt storage pools, and shared with management/services
+# via management/inventory (kept identical on purpose -- single source of
+# truth would normally live in a config-management system / GitOps repo;
+# for the prototype we just keep both YAMLs consistent by hand).
+
+# Primary backend: Ceph RBD. Golden images and linked clones live here.
+ceph:
+  client_id: libvirt
+  keyring_path: /etc/ceph/ceph.client.libvirt.keyring
+  conf_path: /etc/ceph/ceph.conf
+  pools:
+    images: mission-images     # golden images + linked clones (RBD)
+    golden: golden-pool         # optional separate pool for read-only golden images
+  pool_pg_num: 128
+  replica_size: 3
+  # libvirt secret used for cephx auth from qemu -- created by storage.py via
+  # `virsh secret-define` / `virsh secret-set-value`.
+  libvirt_secret_uuid: "5e4b8c1a-9f2d-4e3a-8b7a-1c2d3e4f5a6b"
+
+# Fallback backend for hosts/dev environments without a Ceph cluster
+# (per the design doc's own risk note: "Ceph can be simplified ... have
+# fallback (NFS) if needed for prototype"). Uses local qcow2 backing files
+# via `qemu-img create -b` instead of RBD clone.
+local_qcow2:
+  pool_name: default
+  pool_path: /var/lib/libvirt/images
+  golden_image_dir: /var/lib/libvirt/images/golden
+
+# Which backend is active is set per-host in bootstrap/config/hosts.yaml
+# (hosts.<name>.storage_backend) and mirrored in
+# management/inventory/hosts.yaml.

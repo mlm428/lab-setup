@@ -1,0 +1,13 @@
+# Predefined mission-overlay networks (design doc's "Network Table").
+# A mission's YAML `networks:` section normally references these same
+# name -> VLAN pairs; kept here as the canonical catalog so different
+# missions agree on what "storage" or "sensor" means, even though each
+# mission gets its own isolated OVN logical switch per network (see
+# core/xml_render.py:switch_name).
+networks:
+  control: 100      # Control Plane
+  storage: 110      # Storage traffic
+  operations: 120   # Operations plane
+  sensor: 130       # Sensor data
+  external: 140     # External connectivity
+  management: 150   # Management / out-of-band

@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# Dependency manifest for the Linux-Native Virtualized Compute Cluster
+# prototype (Deliverable A: bootstrap/, Deliverable B: management/).
+#
+# IMPORTANT: on RHEL, the libvirt/Ceph Python bindings are NOT pip packages.
+# They are compiled against system libraries and must come from dnf. Mixing
+# a pip-installed libvirt-python with the system libvirtd is a common source
+# of "undefined symbol" errors, so this project deliberately keeps them out
+# of `pip install -r requirements.txt` and installs them via dnf instead
+# (see bootstrap/modules/packages.py and management/README section "Install").
+# ---------------------------------------------------------------------------
+
+# --- management/ (Deliverable B: FastAPI mission service) -------------------
+fastapi==0.111.*
+uvicorn[standard]==0.29.*
+pydantic==2.7.*
+jinja2==3.1.*
+pyyaml==6.0.*
+ovsdbapp==2.4.*          # OVN Northbound DB client (pure Python, pip-installable)
+
+# --- testing / dev -----------------------------------------------------------
+pytest==8.2.*
+httpx==0.27.*            # required by fastapi.testclient.TestClient
+
+# ---------------------------------------------------------------------------
+# NOT in this file, installed via dnf on each RHEL host by bootstrap.py
+# (see bootstrap/modules/packages.py: RHEL_PACKAGES):
+#
+#   python3-libvirt      -> `import libvirt`            (management/clients/libvirt_client.py)
+#   python3-rados        -> `import rados`               (management/clients/ceph_client.py)
+#   python3-rbd          -> `import rbd`                 (management/clients/ceph_client.py)
+#
+# These three are what actually talk to KVM and Ceph; everything else in
+# this file is portable pip/venv tooling for the management API itself.
+# ---------------------------------------------------------------------------
