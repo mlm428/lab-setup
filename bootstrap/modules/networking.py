@@ -13,6 +13,7 @@ from .util import RunContext, run, log
 
 
 def _bridge_exists(ctx: RunContext, bridge: str) -> bool:
+    """Check whether an OVS bridge already exists (always False in a dry run, since nothing has actually been created yet)."""
     if ctx.dry_run:
         return False
     result = run(ctx, ["ovs-vsctl", "br-exists", bridge], check=False)
@@ -21,6 +22,18 @@ def _bridge_exists(ctx: RunContext, bridge: str) -> bool:
 
 
 def setup_ovs_bridges(ctx: RunContext, cluster_cfg: dict) -> None:
+    """
+    Idempotently create every OVS bridge listed in config/cluster.yaml's
+    `ovs_bridges` (normally the OVN integration bridge and the external/
+    provider-network bridge).
+
+    Args:
+        ctx: Run context (honors --dry-run).
+        cluster_cfg: Parsed config/cluster.yaml.
+
+    Returns:
+        None.
+    """
     bridges = cluster_cfg["ovs_bridges"]
     for role, name in bridges.items():
         if _bridge_exists(ctx, name):
@@ -36,7 +49,15 @@ def attach_physical_to_external_bridge(ctx: RunContext, ifname: str, bridge: str
     """
     Hand a physical NIC over to the external bridge (br-ex) via
     NetworkManager's ovs-port connection type, so provider/external traffic
-    can reach the OVN overlay. `ifname` is the host's uplink NIC.
+    can reach the OVN overlay.
+
+    Args:
+        ctx: Run context (honors --dry-run).
+        ifname: The host's uplink NIC device name.
+        bridge: Target OVS bridge (normally cluster_cfg's ovs_bridges.external).
+
+    Returns:
+        None.
     """
     run(
         ctx,
@@ -65,6 +86,13 @@ def join_ovn_fabric(ctx: RunContext, hosts_cfg: dict) -> None:
     logical switch/port state pushed via the management service's
     ovn_client.py (ovsdbapp -> Northbound DB -> ovn-northd -> Southbound DB
     -> every host's ovn-controller).
+
+    Args:
+        ctx: Run context (honors --dry-run).
+        hosts_cfg: Parsed config/hosts.yaml (for ovn_central.sb_connection).
+
+    Returns:
+        None.
     """
     sb_conn = hosts_cfg["ovn_central"]["sb_connection"]
     run(

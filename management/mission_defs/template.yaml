@@ -1,0 +1,109 @@
+# =============================================================================
+# TEMPLATE mission definition -- copy this file to create a new mission,
+# then edit the copy. This file is not itself deployed by anything; it
+# exists purely as an annotated reference. See README.md in this
+# directory for the full schema writeup.
+#
+# file_version is THIS FILE's own revision (bump it whenever you make a
+# meaningful change to a mission definition you're maintaining over time).
+# It's recorded in deployment status/step logs for audit purposes -- it is
+# NOT the same thing as image_revision below (that's the golden image's
+# version, not the mission file's).
+# =============================================================================
+
+mission: Mission-Template            # unique name; scopes OVN switch/router/port names
+file_version: "1.0.0"                # this file's own revision (semver or any string you like)
+
+# Every network a VM's interfaces: can reference. VLAN ids are cosmetic
+# metadata for this prototype (each mission gets its own isolated OVN
+# logical switch per network regardless of VLAN id) -- keep them
+# consistent with config/networks.yaml's catalog by convention.
+networks:
+  control: 100
+  storage: 110
+  operations: 120
+  sensor: 130
+  external: 140
+  management: 150
+
+vms:
+  # --- Example 1: a linked-clone VM (disk-backed, cloned from a golden image) ---
+  example-db01:
+    type: linked_clone
+
+    # Must match a key in config/storage.yaml's golden.images catalog.
+    image: rhel9-db-golden
+    # Which revision of that image to clone from -- must match a key
+    # under that image's `revisions:` in the catalog. Omit this line
+    # entirely to use the catalog's `default_revision` instead.
+    image_revision: Alpha
+
+    cpu: 4                            # vCPUs
+    memory: 16384                     # MiB
+
+    # No `gpu:` key at all == no GPU for this VM (the common case).
+
+    # Every interface this VM needs, in NIC order. The key is a network
+    # name from `networks:` above.
+    interfaces:
+      control:
+        # mac_suffix = the LAST THREE OCTETS of this interface's MAC
+        # address, e.g. "10:00:00". This is a REQUIRED, OPERATOR-CHOSEN
+        # value whenever the guest software behind this interface has a
+        # MAC address hardcoded into its licensing/configuration -- see
+        # README.md's "Why only three octets?" section for the full
+        # explanation. It stays identical across every deployment of this
+        # mission file.
+        mac_suffix: "10:00:00"
+      storage:
+        mac_suffix: "10:00:01"
+      management:
+        # Omitting mac_suffix (or setting the whole interface to `{}` /
+        # `null`) is allowed for an interface with NO external
+        # substring-matching requirement -- a random suffix is generated
+        # for it at deploy time instead. Because it's random, it is NOT
+        # guaranteed to repeat across redeploys of this same file -- only
+        # use this for interfaces nothing outside the VM needs to
+        # recognize by MAC.
+        mac_suffix: null
+
+  # --- Example 2: a diskless PXE VM with a GPU (MIG or vGPU profile) ---
+  example-render01:
+    type: pxe
+    # pxe VMs are diskless: do NOT set image: or image_revision: here.
+
+    cpu: 8
+    memory: 32768
+
+    # `profile:` must be a value that appears in AT LEAST ONE host's
+    # config/hosts.yaml gpu_devices: list (an already-created MIG or vGPU
+    # slice -- see bootstrap/scripts/enumerate_mdev_gpus.sh). Provisioning
+    # matches this VM to a specific free slice with this exact profile
+    # name at deploy time; if none is free anywhere, the deployment fails
+    # with a clear error rather than silently placing it without a GPU.
+    gpu:
+      profile: H100-MIG-3g.40gb   # or e.g. L4-vGPU-4Q for an NVIDIA L4 slice
+
+    interfaces:
+      control:
+        mac_suffix: "20:00:00"
+      storage:
+        mac_suffix: "20:00:01"
+      operations:
+        mac_suffix: "20:00:02"
+      sensor:
+        mac_suffix: "20:00:03"
+      external:
+        mac_suffix: "20:00:04"
+      management:
+        mac_suffix: "20:00:05"
+
+# Every VM above MUST have exactly one entry here, naming a host that
+# exists in config/hosts.yaml. Deployment validates this has enough
+# CPU/memory/GPU-profile capacity on each named host before provisioning
+# anything (core/placement.py) -- see tools/generate_mission.py for a
+# simple reference auto-placement helper if you'd rather not place VMs by
+# hand.
+placement:
+  example-db01: compute01
+  example-render01: compute01

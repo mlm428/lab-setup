@@ -1,0 +1,63 @@
+# =============================================================================
+# SINGLE SOURCE OF TRUTH for cluster-wide bootstrap settings (packages,
+# services, kernel/GRUB args, OVS bridge names, STIG profile).
+# =============================================================================
+cluster_name: mission-compute-cluster
+
+# CPU vendor controls which IOMMU kernel args gpu.py writes.
+cpu_vendor: intel   # intel | amd
+
+iommu_kernel_args:
+  intel: ["intel_iommu=on", "iommu=pt"]
+  amd: ["amd_iommu=on", "iommu=pt"]
+
+# Kernel modules required for PCI/mdev (MIG/vGPU) passthrough.
+vfio_modules:
+  - vfio
+  - vfio_iommu_type1
+  - vfio_pci
+  - vfio_mdev
+
+ovs_bridges:
+  integration: br-int   # OVN integration bridge (plugged by ovn-controller)
+  external: br-ex        # uplink to physical network / provider network
+
+# systemd services bootstrap.py enables and starts, in order.
+services:
+  - libvirtd
+  - openvswitch
+  - ovn-controller
+  - cockpit.socket
+
+# Packages installed via dnf (bootstrap/modules/packages.py). For an
+# airgapped environment, see bootstrap/scripts/fetch_offline_packages.sh
+# (run on a connected machine) and bootstrap/scripts/setup_local_repo.sh
+# (run on the airgapped rescue node) before running bootstrap.py itself.
+packages:
+  virtualization:
+    - qemu-kvm
+    - libvirt-daemon
+    - libvirt-daemon-driver-qemu
+    - libvirt-client
+    - virt-install
+    - virt-viewer
+    - python3-libvirt
+  networking:
+    - openvswitch
+    - openvswitch-ovn-host
+    - NetworkManager-ovs
+  storage:
+    - ceph-common
+    - python3-rados
+    - python3-rbd
+  management_ui:
+    - cockpit
+    - cockpit-machines
+  compliance:
+    - openscap-scanner
+    - scap-security-guide
+  gpu:
+    - nvidia-driver           # or the vendor package matching your driver branch
+    - nvidia-gpu-operator-cli # placeholder: whatever mdev/MIG/vGPU management CLI ships with your driver
+
+stig_profile: "xccdf_org.ssgproject.content_profile_stig"

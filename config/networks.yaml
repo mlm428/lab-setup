@@ -1,0 +1,14 @@
+# =============================================================================
+# SINGLE SOURCE OF TRUTH for the predefined mission-overlay network catalog
+# (design doc's "Network Table"). A mission's `networks:` section normally
+# references these same name -> VLAN pairs; each mission still gets its
+# own isolated OVN logical switch per network regardless (see
+# management/core/xml_render.py:switch_name).
+# =============================================================================
+networks:
+  control: 100
+  storage: 110
+  operations: 120
+  sensor: 130
+  external: 140
+  management: 150

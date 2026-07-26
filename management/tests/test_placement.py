@@ -1,3 +1,4 @@
+"""Unit tests for core/placement.py -- capacity + GPU-profile-aware placement validation and the reference greedy bin-packer."""
 from __future__ import annotations
 
 import sys
@@ -6,111 +7,155 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.placement import greedy_place, validate_placement
-from core.types import HostSpec, MissionSpec, VMSpec, VMType
+from core.placement import greedy_place, reserve_gpu_devices, validate_placement
+from core.types import GpuDeviceSpec, HostSpec, InterfaceSpec, MissionSpec, VMSpec, VMType
 
 
-def make_mission(vms: dict, placement: dict, networks=None):
-    return MissionSpec(
-        name="Mission-Test",
-        networks=networks or {"control": 100},
-        vms=vms,
-        placement=placement,
-    )
+def ifaces(*names):
+    return {n: InterfaceSpec(network=n, mac_suffix=None) for n in names}
+
+
+def make_host(name, cpus=16, memory_mb=65536, gpu_devices=None):
+    return HostSpec(name=name, cpus=cpus, memory_mb=memory_mb, gpu_devices=gpu_devices or [])
 
 
 class TestValidatePlacement(unittest.TestCase):
-    def test_within_capacity_passes(self):
-        hosts = {"h1": HostSpec(name="h1", cpus=16, memory_mb=32768, gpus=1)}
-        vm = VMSpec(name="vm1", type=VMType.PXE, cpu=8, memory_mb=16384, interfaces=["control"])
-        mission = make_mission({"vm1": vm}, {"vm1": "h1"})
+    def test_fits_within_capacity(self):
+        vm = VMSpec(name="vm1", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=ifaces("control"))
+        mission = MissionSpec(name="M", networks={"control": 100}, vms={"vm1": vm}, placement={"vm1": "h1"})
+        hosts = {"h1": make_host("h1")}
         report = validate_placement(mission, hosts)
         self.assertTrue(report.ok)
 
     def test_cpu_oversubscription_detected(self):
-        hosts = {"h1": HostSpec(name="h1", cpus=4, memory_mb=32768, gpus=0)}
-        vm = VMSpec(name="vm1", type=VMType.PXE, cpu=8, memory_mb=16384, interfaces=["control"])
-        mission = make_mission({"vm1": vm}, {"vm1": "h1"})
+        vm = VMSpec(name="vm1", type=VMType.PXE, cpu=64, memory_mb=8192, interfaces=ifaces("control"))
+        mission = MissionSpec(name="M", networks={"control": 100}, vms={"vm1": vm}, placement={"vm1": "h1"})
+        hosts = {"h1": make_host("h1", cpus=16)}
         report = validate_placement(mission, hosts)
         self.assertFalse(report.ok)
         self.assertEqual(report.violations[0].resource, "cpu")
 
     def test_memory_oversubscription_detected(self):
-        hosts = {"h1": HostSpec(name="h1", cpus=16, memory_mb=8192, gpus=0)}
-        vm = VMSpec(name="vm1", type=VMType.PXE, cpu=4, memory_mb=16384, interfaces=["control"])
-        mission = make_mission({"vm1": vm}, {"vm1": "h1"})
+        vm = VMSpec(name="vm1", type=VMType.PXE, cpu=4, memory_mb=999999, interfaces=ifaces("control"))
+        mission = MissionSpec(name="M", networks={"control": 100}, vms={"vm1": vm}, placement={"vm1": "h1"})
+        hosts = {"h1": make_host("h1")}
         report = validate_placement(mission, hosts)
         self.assertFalse(report.ok)
         self.assertEqual(report.violations[0].resource, "memory_mb")
 
-    def test_gpu_oversubscription_detected(self):
-        hosts = {"h1": HostSpec(name="h1", cpus=64, memory_mb=262144, gpus=1)}
-        vms = {
-            "vm1": VMSpec(name="vm1", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=["control"], gpu=True),
-            "vm2": VMSpec(name="vm2", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=["control"], gpu=True),
-        }
-        mission = make_mission(vms, {"vm1": "h1", "vm2": "h1"})
-        report = validate_placement(mission, hosts)
-        self.assertFalse(report.ok)
-        self.assertEqual(report.violations[0].resource, "gpus")
-
     def test_unknown_host_detected(self):
-        hosts = {"h1": HostSpec(name="h1", cpus=16, memory_mb=32768, gpus=0)}
-        vm = VMSpec(name="vm1", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=["control"])
-        mission = make_mission({"vm1": vm}, {"vm1": "h-does-not-exist"})
+        vm = VMSpec(name="vm1", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=ifaces("control"))
+        mission = MissionSpec(name="M", networks={"control": 100}, vms={"vm1": vm}, placement={"vm1": "ghost-host"})
+        hosts = {"h1": make_host("h1")}
         report = validate_placement(mission, hosts)
         self.assertFalse(report.ok)
         self.assertEqual(report.violations[0].resource, "unknown_host")
 
-    def test_multiple_vms_sum_correctly_on_shared_host(self):
-        hosts = {"h1": HostSpec(name="h1", cpus=10, memory_mb=32768, gpus=0)}
-        vms = {
-            "vm1": VMSpec(name="vm1", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=["control"]),
-            "vm2": VMSpec(name="vm2", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=["control"]),
-        }
-        mission = make_mission(vms, {"vm1": "h1", "vm2": "h1"})
-        self.assertTrue(validate_placement(mission, hosts).ok)  # 8 <= 10
+    def test_gpu_profile_capacity_respected(self):
+        vm = VMSpec(name="vm1", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=ifaces("control"), gpu_profile="H100-MIG-3g.40gb")
+        mission = MissionSpec(name="M", networks={"control": 100}, vms={"vm1": vm}, placement={"vm1": "h1"})
+        hosts = {"h1": make_host("h1", gpu_devices=[GpuDeviceSpec(profile="H100-MIG-3g.40gb", mdev_uuid="u1")])}
+        report = validate_placement(mission, hosts)
+        self.assertTrue(report.ok)
 
-        vms["vm3"] = VMSpec(name="vm3", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=["control"])
-        mission2 = make_mission(vms, {"vm1": "h1", "vm2": "h1", "vm3": "h1"})
-        self.assertFalse(validate_placement(mission2, hosts).ok)  # 12 > 10
+    def test_gpu_profile_oversubscription_detected(self):
+        vms = {
+            "vm1": VMSpec(name="vm1", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=ifaces("control"), gpu_profile="H100-MIG-3g.40gb"),
+            "vm2": VMSpec(name="vm2", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=ifaces("control"), gpu_profile="H100-MIG-3g.40gb"),
+        }
+        mission = MissionSpec(name="M", networks={"control": 100}, vms=vms, placement={"vm1": "h1", "vm2": "h1"})
+        hosts = {"h1": make_host("h1", gpu_devices=[GpuDeviceSpec(profile="H100-MIG-3g.40gb", mdev_uuid="u1")])}
+        report = validate_placement(mission, hosts)
+        self.assertFalse(report.ok)
+        self.assertEqual(report.violations[0].resource, "gpu_profile:H100-MIG-3g.40gb")
+
+    def test_wrong_gpu_profile_not_satisfied_by_different_profile(self):
+        vm = VMSpec(name="vm1", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=ifaces("control"), gpu_profile="L4-vGPU-4Q")
+        mission = MissionSpec(name="M", networks={"control": 100}, vms={"vm1": vm}, placement={"vm1": "h1"})
+        hosts = {"h1": make_host("h1", gpu_devices=[GpuDeviceSpec(profile="H100-MIG-3g.40gb", mdev_uuid="u1")])}
+        report = validate_placement(mission, hosts)
+        self.assertFalse(report.ok)
+        self.assertEqual(report.violations[0].resource, "gpu_profile:L4-vGPU-4Q")
 
 
 class TestGreedyPlace(unittest.TestCase):
-    def test_places_all_vms_within_capacity(self):
-        hosts = {
-            "h1": HostSpec(name="h1", cpus=16, memory_mb=32768, gpus=1),
-            "h2": HostSpec(name="h2", cpus=16, memory_mb=32768, gpus=0),
-        }
-        vm_names = ["gpu-vm", "plain-vm"]
-        requirements = {
-            "gpu-vm": {"cpu": 4, "memory_mb": 8192, "gpu": True},
-            "plain-vm": {"cpu": 4, "memory_mb": 8192, "gpu": False},
-        }
-        placement = greedy_place(vm_names, requirements, hosts)
-        self.assertEqual(placement["gpu-vm"], "h1")  # only h1 has a GPU
-        self.assertIn(placement["plain-vm"], ["h1", "h2"])
+    def test_places_within_capacity(self):
+        hosts = {"h1": make_host("h1", cpus=8), "h2": make_host("h2", cpus=8)}
+        reqs = {"vm1": {"cpu": 4, "memory_mb": 1024, "gpu_profile": None}, "vm2": {"cpu": 4, "memory_mb": 1024, "gpu_profile": None}}
+        placement = greedy_place(["vm1", "vm2"], reqs, hosts)
+        self.assertEqual(set(placement.keys()), {"vm1", "vm2"})
+        self.assertIn(placement["vm1"], hosts)
 
     def test_raises_when_infeasible(self):
-        hosts = {"h1": HostSpec(name="h1", cpus=2, memory_mb=4096, gpus=0)}
-        vm_names = ["big-vm"]
-        requirements = {"big-vm": {"cpu": 8, "memory_mb": 4096, "gpu": False}}
+        hosts = {"h1": make_host("h1", cpus=8)}
+        reqs = {"vm1": {"cpu": 64, "memory_mb": 1024, "gpu_profile": None}}
         with self.assertRaises(RuntimeError):
-            greedy_place(vm_names, requirements, hosts)
+            greedy_place(["vm1"], reqs, hosts)
 
-    def test_spreads_load_across_hosts(self):
+    def test_gpu_vm_only_placed_on_host_with_matching_profile(self):
         hosts = {
-            "h1": HostSpec(name="h1", cpus=8, memory_mb=16384, gpus=0),
-            "h2": HostSpec(name="h2", cpus=8, memory_mb=16384, gpus=0),
+            "h1": make_host("h1", cpus=64, gpu_devices=[GpuDeviceSpec(profile="H100-MIG-3g.40gb", mdev_uuid="u1")]),
+            "h2": make_host("h2", cpus=64),
         }
-        vm_names = [f"vm{i}" for i in range(4)]
-        requirements = {name: {"cpu": 4, "memory_mb": 4096, "gpu": False} for name in vm_names}
-        placement = greedy_place(vm_names, requirements, hosts)
-        counts = {"h1": 0, "h2": 0}
-        for host in placement.values():
-            counts[host] += 1
-        self.assertEqual(counts["h1"], 2)
-        self.assertEqual(counts["h2"], 2)
+        reqs = {"vm1": {"cpu": 4, "memory_mb": 1024, "gpu_profile": "H100-MIG-3g.40gb"}}
+        placement = greedy_place(["vm1"], reqs, hosts)
+        self.assertEqual(placement["vm1"], "h1")
+
+    def test_two_gpu_vms_exhaust_slices_third_fails(self):
+        hosts = {"h1": make_host("h1", cpus=64, gpu_devices=[GpuDeviceSpec(profile="X", mdev_uuid="u1"), GpuDeviceSpec(profile="X", mdev_uuid="u2")])}
+        reqs = {n: {"cpu": 1, "memory_mb": 1024, "gpu_profile": "X"} for n in ["vm1", "vm2", "vm3"]}
+        with self.assertRaises(RuntimeError):
+            greedy_place(["vm1", "vm2", "vm3"], reqs, hosts)
+
+
+class TestReserveGpuDevices(unittest.TestCase):
+    def test_reserves_matching_free_device(self):
+        vm = VMSpec(name="vm1", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=ifaces("control"), gpu_profile="X")
+        mission = MissionSpec(name="M", networks={"control": 100}, vms={"vm1": vm}, placement={"vm1": "h1"})
+        hosts = {"h1": make_host("h1", gpu_devices=[GpuDeviceSpec(profile="X", mdev_uuid="u1")])}
+        result = reserve_gpu_devices(mission, hosts, already_reserved_uuids=set())
+        self.assertEqual(result, {"vm1": "u1"})
+
+    def test_non_gpu_vms_absent_from_result(self):
+        vm = VMSpec(name="vm1", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=ifaces("control"))
+        mission = MissionSpec(name="M", networks={"control": 100}, vms={"vm1": vm}, placement={"vm1": "h1"})
+        hosts = {"h1": make_host("h1")}
+        result = reserve_gpu_devices(mission, hosts, already_reserved_uuids=set())
+        self.assertEqual(result, {})
+
+    def test_skips_uuids_already_reserved_by_other_active_deployments(self):
+        vm = VMSpec(name="vm1", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=ifaces("control"), gpu_profile="X")
+        mission = MissionSpec(name="M", networks={"control": 100}, vms={"vm1": vm}, placement={"vm1": "h1"})
+        hosts = {"h1": make_host("h1", gpu_devices=[GpuDeviceSpec(profile="X", mdev_uuid="u1"), GpuDeviceSpec(profile="X", mdev_uuid="u2")])}
+        result = reserve_gpu_devices(mission, hosts, already_reserved_uuids={"u1"})
+        self.assertEqual(result, {"vm1": "u2"})
+
+    def test_raises_when_all_matching_devices_already_reserved(self):
+        vm = VMSpec(name="vm1", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=ifaces("control"), gpu_profile="X")
+        mission = MissionSpec(name="M", networks={"control": 100}, vms={"vm1": vm}, placement={"vm1": "h1"})
+        hosts = {"h1": make_host("h1", gpu_devices=[GpuDeviceSpec(profile="X", mdev_uuid="u1")])}
+        with self.assertRaises(RuntimeError):
+            reserve_gpu_devices(mission, hosts, already_reserved_uuids={"u1"})
+
+    def test_two_gpu_vms_in_same_mission_get_distinct_devices(self):
+        vms = {
+            "vm1": VMSpec(name="vm1", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=ifaces("control"), gpu_profile="X"),
+            "vm2": VMSpec(name="vm2", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=ifaces("control"), gpu_profile="X"),
+        }
+        mission = MissionSpec(name="M", networks={"control": 100}, vms=vms, placement={"vm1": "h1", "vm2": "h1"})
+        hosts = {"h1": make_host("h1", gpu_devices=[GpuDeviceSpec(profile="X", mdev_uuid="u1"), GpuDeviceSpec(profile="X", mdev_uuid="u2")])}
+        result = reserve_gpu_devices(mission, hosts, already_reserved_uuids=set())
+        self.assertEqual(set(result.values()), {"u1", "u2"})
+
+    def test_raises_when_second_gpu_vm_in_same_mission_has_no_device_left(self):
+        vms = {
+            "vm1": VMSpec(name="vm1", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=ifaces("control"), gpu_profile="X"),
+            "vm2": VMSpec(name="vm2", type=VMType.PXE, cpu=4, memory_mb=8192, interfaces=ifaces("control"), gpu_profile="X"),
+        }
+        mission = MissionSpec(name="M", networks={"control": 100}, vms=vms, placement={"vm1": "h1", "vm2": "h1"})
+        hosts = {"h1": make_host("h1", gpu_devices=[GpuDeviceSpec(profile="X", mdev_uuid="u1")])}
+        with self.assertRaises(RuntimeError):
+            reserve_gpu_devices(mission, hosts, already_reserved_uuids=set())
 
 
 if __name__ == "__main__":

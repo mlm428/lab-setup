@@ -68,9 +68,9 @@
     </interface>
 {%- endfor %}
 {%- for gpu in gpu_devices %}
-    <hostdev mode='subsystem' type='pci' managed='yes'>
+    <hostdev mode='subsystem' type='mdev' model='vfio-pci' display='off'>
       <source>
-        <address domain='0x{{ gpu.domain }}' bus='0x{{ gpu.bus }}' slot='0x{{ gpu.slot }}' function='0x{{ gpu.function }}'/>
+        <address uuid='{{ gpu.mdev_uuid }}'/>
       </source>
     </hostdev>
 {%- endfor %}

@@ -14,6 +14,7 @@ from .util import RunContext, run, log
 
 
 def _flatten(package_groups: dict) -> list[str]:
+    """Flatten config/cluster.yaml's grouped `packages:` mapping (virtualization/networking/storage/etc.) into one flat package name list."""
     pkgs: list[str] = []
     for group in package_groups.values():
         pkgs.extend(group)
@@ -39,6 +40,18 @@ def install_base_packages(ctx: RunContext, cluster_cfg: dict) -> None:
     enable+start the services listed under `services`. Idempotent: only
     installs what isn't already present, and `systemctl enable --now` is a
     no-op if the service is already enabled/running.
+
+    In an airgapped environment, `dnf install` here works exactly as it
+    does normally -- see ../scripts/fetch_offline_packages.sh and
+    ../scripts/setup_local_repo.sh for getting these same packages onto a
+    host with no internet access, no code changes needed here.
+
+    Args:
+        ctx: Run context (honors --dry-run).
+        cluster_cfg: Parsed config/cluster.yaml (for `packages` and `services`).
+
+    Returns:
+        None.
     """
     all_pkgs = _flatten(cluster_cfg["packages"])
     already = installed_packages()

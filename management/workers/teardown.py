@@ -6,34 +6,53 @@ gone" errors) so teardown can be safely retried after a partial failure.
 """
 from __future__ import annotations
 
-from core.state import store
-from core.types import MissionSpec, MissionState
 from clients import ovn_client
-from services import compute, networking, storage as storage_service
-from workers.deploy import _storage_context_from_cluster_cfg
+from core.state import store
+from core.types import HostSpec, MissionSpec, MissionState
+from services import compute, networking
+from services import storage as storage_service
+from services.cluster_config import DeploymentConfig
 
 
 def teardown_mission(
     mission_id: str,
     mission: MissionSpec,
-    hosts: dict,
-    cluster_cfg: dict,
+    hosts: dict[str, HostSpec],
+    deployment_cfg: DeploymentConfig,
 ) -> None:
+    """
+    Tear down every resource belonging to one mission deployment: VMs,
+    then OVN networking, then runtime storage. Never raises -- any
+    exception is caught and recorded on the mission's status (state=Error)
+    rather than propagated, since this runs as an untracked FastAPI
+    background task.
+
+    Args:
+        mission_id: The deployment's id.
+        mission: The mission spec that was deployed (from
+            MissionStatus.spec -- see api/routes.py's DELETE handler).
+        hosts: Full host inventory (for VM host addresses).
+        deployment_cfg: OVN connection + runtime storage config.
+
+    Returns:
+        None. On success, the mission transitions to state=Destroyed,
+        which also frees its reserved MAC prefix for future deployments
+        (see core/state.py:MissionStore.active_mac_prefixes).
+    """
     store.update_state(mission_id, MissionState.DESTROYING)
-    storage_ctx = _storage_context_from_cluster_cfg(cluster_cfg)
 
     try:
-        for vm_name, vm in mission.vms.items():
+        for vm_name in mission.vms:
             host_name = mission.placement[vm_name]
             host_address = hosts[host_name].address
             compute.destroy_vm(vm_name, host_address)
             store.log_step(mission_id, f"destroy_vm:{vm_name}", "ok", host_name)
 
-        api = ovn_client.connect(cluster_cfg["ovn"]["nb_connection"])
+        api = ovn_client.connect(deployment_cfg.ovn_nb_connection)
         networking.teardown_mission_networking(api, mission)
         store.log_step(mission_id, "networking_teardown", "ok", "")
 
-        storage_service.teardown_mission_storage(mission, storage_ctx)
+        storage_service.teardown_mission_storage(mission, deployment_cfg.runtime)
         store.log_step(mission_id, "storage_teardown", "ok", "")
 
         store.update_state(mission_id, MissionState.DESTROYED)

@@ -11,6 +11,17 @@ from .util import RunContext, run, service_is_active, log
 
 
 def enable_cockpit(ctx: RunContext) -> None:
+    """
+    Idempotently enable + start cockpit.socket (which activates
+    cockpit-machines for ad hoc VM inspection alongside the management
+    API's bulk operations).
+
+    Args:
+        ctx: Run context (honors --dry-run).
+
+    Returns:
+        None. A no-op if cockpit.socket is already active.
+    """
     if service_is_active(ctx, "cockpit.socket"):
         log.info("cockpit: already active")
         ctx.record("cockpit", "skipped", "already active")

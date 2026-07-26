@@ -18,6 +18,7 @@ from typing import Sequence
 
 
 def get_logger(name: str) -> logging.Logger:
+    """Get (or create, on first call) a console logger with a consistent timestamp/level/name/message format."""
     logger = logging.getLogger(name)
     if not logger.handlers:
         handler = logging.StreamHandler()
@@ -61,6 +62,7 @@ class RunContext:
     audit: list = field(default_factory=list)
 
     def record(self, step: str, status: str, detail: str = "") -> None:
+        """Append one entry to this run's audit trail (step name, "ok"/"skipped"/"failed", free-form detail)."""
         self.audit.append({"step": step, "status": status, "detail": detail})
 
 
@@ -75,6 +77,24 @@ def run(
     Run a host command, honoring RunContext.dry_run. Always logs the
     command. Raises CommandError on non-zero exit when check=True (mirrors
     subprocess.run(check=True) but with our own logging/audit trail).
+
+    Args:
+        ctx: Run context -- if ctx.dry_run, the command is logged but
+            never actually executed, and a synthetic success result is
+            returned instead.
+        cmd: Argv list (never a shell string -- no shell=True anywhere in
+            this module, by design).
+        check: If True (default), raise CommandError on non-zero exit.
+            Pass False for commands where a non-zero exit is an expected,
+            handled outcome (e.g. an idempotency probe).
+        input_text: Optional stdin to pass to the command.
+
+    Returns:
+        The completed subprocess.CompletedProcess (or a synthetic
+        zero-exit one, in a dry run).
+
+    Raises:
+        CommandError: if check=True and the command exits non-zero.
     """
     printable = " ".join(cmd)
     if ctx.dry_run:
@@ -104,10 +124,25 @@ def run(
 
 
 def command_exists(binary: str) -> bool:
+    """True if `binary` is found on PATH."""
     return shutil.which(binary) is not None
 
 
 def service_is_active(ctx: RunContext, service: str) -> bool:
+    """
+    Check whether a systemd unit is currently active.
+
+    Args:
+        ctx: Run context -- in a dry run, always returns True (nothing
+            has actually been started yet, so callers that branch on
+            "already active, skip" correctly skip re-issuing the enable
+            command during a rehearsal).
+        service: systemd unit name (e.g. "libvirtd", "cockpit.socket").
+
+    Returns:
+        True if `systemctl is-active` reports "active", False otherwise
+        (including if systemctl itself isn't found).
+    """
     if ctx.dry_run:
         return True
     try:

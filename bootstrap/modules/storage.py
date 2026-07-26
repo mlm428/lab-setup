@@ -1,8 +1,13 @@
 """
 Storage backend setup on each host: either wire up a libvirt storage pool
-backed by Ceph RBD (primary path), or ensure a local qcow2-backing-file pool
-exists (fallback path, per the design doc's own "have fallback if needed
-for prototype" risk mitigation).
+backed by Ceph RBD (primary path), or ensure a local qcow2-backing-file
+pool exists (fallback path, per the design doc's own "have fallback if
+needed for prototype" risk mitigation).
+
+Reads from config/storage.yaml's `runtime` section (the pool VM disks are
+actually written to). `golden` (source images) is a management-service-
+side concern only (services/storage.py) -- bootstrap.py does not need to
+reach the golden image store, since it never clones anything itself.
 
 Ceph connectivity is validated with the librados Python binding, matching
 the design doc's cited example almost verbatim:
@@ -25,10 +30,17 @@ except ImportError:  # pragma: no cover - expected in the build sandbox / on dev
 
 def verify_ceph_connectivity(ctx: RunContext, storage_cfg: dict) -> bool:
     """
-    Connect to the Ceph cluster with librados and fetch the cluster FSID as
-    a liveness check. Returns False (rather than raising) so bootstrap.py
-    can treat "no Ceph reachable" as a soft failure when storage_backend is
-    local_qcow2 for this host.
+    Connect to the Ceph cluster with librados and fetch the cluster FSID
+    as a liveness check.
+
+    Args:
+        ctx: Run context (honors --dry-run).
+        storage_cfg: Parsed config/storage.yaml.
+
+    Returns:
+        True if the connection + FSID fetch succeeded, False otherwise
+        (never raises) -- so bootstrap.py can treat "no Ceph reachable" as
+        a soft failure when a host's storage_backend is local_qcow2.
     """
     if ctx.dry_run:
         log.info("[dry-run] would verify Ceph connectivity via librados")
@@ -39,7 +51,7 @@ def verify_ceph_connectivity(ctx: RunContext, storage_cfg: dict) -> bool:
         ctx.record("ceph_connectivity", "skipped", "python3-rados not installed")
         return False
 
-    conf_path = storage_cfg["ceph"]["conf_path"]
+    conf_path = storage_cfg["runtime"]["ceph"]["conf_path"]
     try:
         cluster = rados.Rados(conffile=conf_path)
         cluster.connect(timeout=5)
@@ -56,14 +68,21 @@ def verify_ceph_connectivity(ctx: RunContext, storage_cfg: dict) -> bool:
 
 def ensure_libvirt_rbd_pool(ctx: RunContext, storage_cfg: dict) -> None:
     """
-    Define (idempotently) a libvirt storage pool of type 'rbd' pointing at
-    the mission-images pool, per the design doc:
+    Idempotently define a libvirt storage pool of type 'rbd' pointing at
+    the runtime pool, per the design doc:
 
         virsh pool-create-as ceph-pool --type rbd \
-            --target /var/lib/libvirt/images --source-name mission-images
+            --target /var/lib/libvirt/images --source-name mission-runtime
+
+    Args:
+        ctx: Run context.
+        storage_cfg: Parsed config/storage.yaml.
+
+    Returns:
+        None.
     """
     pool_name = "ceph-pool"
-    images_pool = storage_cfg["ceph"]["pools"]["images"]
+    runtime_pool = storage_cfg["runtime"]["ceph"]["pool"]
 
     check = run(ctx, ["virsh", "pool-info", pool_name], check=False)
     if check.returncode == 0:
@@ -82,16 +101,27 @@ def ensure_libvirt_rbd_pool(ctx: RunContext, storage_cfg: dict) -> None:
             "--target",
             "/var/lib/libvirt/images",
             "--source-name",
-            images_pool,
+            runtime_pool,
         ],
     )
-    ctx.record("libvirt_rbd_pool", "ok", f"{pool_name} -> {images_pool}")
-    log.info("storage: created libvirt RBD pool %s -> ceph pool %s", pool_name, images_pool)
+    ctx.record("libvirt_rbd_pool", "ok", f"{pool_name} -> {runtime_pool}")
+    log.info("storage: created libvirt RBD pool %s -> ceph pool %s", pool_name, runtime_pool)
 
 
 def ensure_local_fallback_pool(ctx: RunContext, storage_cfg: dict) -> None:
-    cfg = storage_cfg["local_qcow2"]
-    run(ctx, ["mkdir", "-p", cfg["golden_image_dir"]], check=False)
+    """
+    Idempotently define and start a local directory-backed libvirt storage
+    pool, for hosts using storage_backend: local_qcow2.
+
+    Args:
+        ctx: Run context.
+        storage_cfg: Parsed config/storage.yaml.
+
+    Returns:
+        None.
+    """
+    cfg = storage_cfg["runtime"]["local_qcow2"]
+    run(ctx, ["mkdir", "-p", cfg["pool_path"]], check=False)
     check = run(ctx, ["virsh", "pool-info", cfg["pool_name"]], check=False)
     if check.returncode == 0:
         ctx.record("local_pool", "skipped", cfg["pool_name"])
@@ -114,6 +144,23 @@ def ensure_local_fallback_pool(ctx: RunContext, storage_cfg: dict) -> None:
 
 
 def configure_storage(ctx: RunContext, storage_cfg: dict, backend: str) -> None:
+    """
+    Set up whichever storage backend this host uses.
+
+    Args:
+        ctx: Run context.
+        storage_cfg: Parsed config/storage.yaml.
+        backend: "ceph_rbd" or "local_qcow2" (from this host's entry in
+            config/hosts.yaml).
+
+    Returns:
+        None.
+
+    Raises:
+        RuntimeError: if backend=="ceph_rbd" but Ceph is unreachable (and
+            not a dry run).
+        ValueError: if `backend` is neither "ceph_rbd" nor "local_qcow2".
+    """
     if backend == "ceph_rbd":
         reachable = verify_ceph_connectivity(ctx, storage_cfg)
         if reachable or ctx.dry_run:

@@ -1,0 +1,2 @@
+This directory holds per-host, per-run bootstrap logs written by
+rescue/orchestrate.py (<host>-<timestamp>.log). Empty until you run it.

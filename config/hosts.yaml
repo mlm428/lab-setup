@@ -1,0 +1,88 @@
+# =============================================================================
+# SINGLE SOURCE OF TRUTH for cluster host inventory.
+#
+# Used by BOTH bootstrap/ (to know what to configure on each host) and
+# management/ (for placement/capacity validation and libvirt connection
+# addresses). Earlier drafts of this project kept two separate copies
+# (bootstrap/config/hosts.yaml and management/inventory/hosts.yaml) that
+# had to be hand-synced -- that duplication has been removed. Edit only
+# this file.
+#
+# GPU NOTE: gpu_devices lists specific, already-partitioned GPU slices
+# (NVIDIA MIG profiles for H100, NVIDIA vGPU profiles for L4), each with
+# its own mediated-device (mdev) UUID. Creating these slices (nvidia-smi
+# mig -cgi ... for MIG, or the NVIDIA vGPU manager for L4) is a manual,
+# one-time host-side step this automation does not perform -- see
+# bootstrap/scripts/enumerate_mdev_gpus.sh, which lists whatever mdevs
+# already exist on a host so you can copy their UUIDs in here after you've
+# created them. The source doc's own illustrative host table only had 4
+# total (whole-GPU) slots across 2 hosts, which we've translated into 4
+# MIG slices on compute01 and 4 vGPU slices on compute03 below -- enough
+# for the proof-of-concept's 7 GPU VMs. Confirm actual profile names/
+# counts/UUIDs against your real hardware before a real deployment.
+# =============================================================================
+hosts:
+  compute01:
+    address: compute01.cluster.local
+    role: [libvirt, ovn-controller, ceph-osd]
+    cpus: 64
+    memory_mb: 262144            # 256 GiB
+    numa_nodes: 2
+    storage_backend: ceph_rbd    # ceph_rbd | local_qcow2 -- see config/storage.yaml
+    gpu_devices:                 # NVIDIA H100, partitioned via MIG
+      - profile: H100-MIG-3g.40gb
+        mdev_uuid: aaaaaaaa-0000-0000-0000-000000000001
+      - profile: H100-MIG-3g.40gb
+        mdev_uuid: aaaaaaaa-0000-0000-0000-000000000002
+      - profile: H100-MIG-3g.40gb
+        mdev_uuid: aaaaaaaa-0000-0000-0000-000000000003
+      - profile: H100-MIG-3g.40gb
+        mdev_uuid: aaaaaaaa-0000-0000-0000-000000000004
+  compute02:
+    address: compute02.cluster.local
+    role: [libvirt, ceph-osd]
+    cpus: 64
+    memory_mb: 262144
+    numa_nodes: 2
+    storage_backend: ceph_rbd
+    gpu_devices: []
+  compute03:
+    address: compute03.cluster.local
+    role: [libvirt, ovn-controller, ceph-osd]
+    cpus: 64
+    memory_mb: 262144
+    numa_nodes: 2
+    storage_backend: ceph_rbd
+    gpu_devices:                 # NVIDIA L4, partitioned via vGPU
+      - profile: L4-vGPU-4Q
+        mdev_uuid: bbbbbbbb-0000-0000-0000-000000000001
+      - profile: L4-vGPU-4Q
+        mdev_uuid: bbbbbbbb-0000-0000-0000-000000000002
+      - profile: L4-vGPU-4Q
+        mdev_uuid: bbbbbbbb-0000-0000-0000-000000000003
+      - profile: L4-vGPU-4Q
+        mdev_uuid: bbbbbbbb-0000-0000-0000-000000000004
+  compute04:
+    address: compute04.cluster.local
+    role: [libvirt, ceph-osd]
+    cpus: 64
+    memory_mb: 262144
+    numa_nodes: 2
+    storage_backend: ceph_rbd
+    gpu_devices: []
+
+ceph_monitors:
+  - name: ceph-mon1
+    address: ceph-mon1.cluster.local
+    port: 6789
+  - name: ceph-mon2
+    address: ceph-mon2.cluster.local
+    port: 6789
+  - name: ceph-mon3
+    address: ceph-mon3.cluster.local
+    port: 6789
+
+ovn_central:
+  nb_connection: "tcp:compute01.cluster.local:6641"
+  sb_connection: "tcp:compute01.cluster.local:6642"
+  integration_bridge: br-int

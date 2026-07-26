@@ -42,7 +42,7 @@ def _require_ovsdbapp():
 def connect(nb_connection_string: str, timeout: int = 10):
     """
     nb_connection_string example: 'tcp:compute01.cluster.local:6641'
-    (see bootstrap/config/hosts.yaml: ovn_central.nb_connection).
+    (see config/hosts.yaml: ovn_central.nb_connection).
     """
     _require_ovsdbapp()
     idl = ovs_connection.OvsdbIdl.from_server(nb_connection_string, "OVN_Northbound")

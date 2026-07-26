@@ -4,9 +4,9 @@ real" workflow from the design doc, run via FastAPI's BackgroundTasks so
 `POST /missions` returns immediately. Steps, in order:
 
   1. Create Networks   -- OVN logical switches, router, router ports
-  2. Clone Disks        -- Ceph RBD clone (or local qcow2) per linked-clone VM
+  2. Clone Disks        -- Ceph RBD clone/copy (or local qcow2) per linked-clone VM
   3. Define VMs          -- render libvirt XML, attach OVN ports + GPU
-                            hostdevs, define+start
+                            mdev hostdevs, define+start
   4. Boot VMs / Validate -- confirm VM count, NICs, MACs, disks, GPU
                             hostdevs, CPU/mem all match spec
 
@@ -17,83 +17,95 @@ Rollback of partial resources is complex (marked as future work)").
 """
 from __future__ import annotations
 
-from core.state import store
-from core.types import MissionSpec, MissionState
-from core.xml_render import StorageContext
 from clients import ovn_client
-from services import compute, networking, storage as storage_service, missions as missions_service, validation
-
-
-def _gpu_allocator(hosts: dict) -> dict:
-    """Tracks which of each host's gpu_pci_addresses have been handed out
-    so two GPU VMs on the same host never get the same PCI device."""
-    return {name: list(host.gpu_pci_addresses) for name, host in hosts.items()}
-
-
-def _storage_context_from_cluster_cfg(cluster_cfg: dict) -> StorageContext:
-    backend = cluster_cfg["storage"]["backend"]
-    if backend == "ceph_rbd":
-        ceph_cfg = cluster_cfg["storage"]["ceph"]
-        return StorageContext(
-            backend="ceph_rbd",
-            ceph_pool=ceph_cfg["pool"],
-            ceph_client_id=ceph_cfg["client_id"],
-            ceph_secret_uuid=ceph_cfg["secret_uuid"],
-            ceph_monitors=ceph_cfg["monitors"],
-        )
-    return StorageContext(backend="local_qcow2", local_qcow2_dir=cluster_cfg["storage"]["local_qcow2"]["dir"])
+from core.state import store
+from core.types import HostSpec, MissionSpec, MissionState
+from services import compute, networking
+from services import storage as storage_service
+from services import validation
+from services.cluster_config import DeploymentConfig
 
 
 def deploy_mission(
     mission_id: str,
     mission: MissionSpec,
-    hosts: dict,
-    cluster_cfg: dict,
+    hosts: dict[str, HostSpec],
+    deployment_cfg: DeploymentConfig,
 ) -> None:
-    storage_ctx = _storage_context_from_cluster_cfg(cluster_cfg)
-    gpu_pool = _gpu_allocator(hosts)
+    """
+    Run the full four-step provisioning workflow for one mission
+    deployment. Never raises -- any exception is caught and recorded on
+    the mission's status (state=Error) rather than propagated, since this
+    runs as an untracked FastAPI background task.
+
+    Args:
+        mission_id: The deployment's id (from services.missions.register_mission).
+        mission: The mission spec to provision. MAC addresses and GPU
+            device allocations for this deployment were already resolved
+            once, atomically, at registration time (see
+            core/state.py:MissionStore.register_deployment) and are read
+            from the mission's status here rather than recomputed --
+            guaranteeing they can never disagree with what was actually
+            reserved against other concurrently-active deployments.
+        hosts: Full host inventory (for VM host addresses).
+        deployment_cfg: OVN connection + runtime/golden storage config
+            (see services/cluster_config.py).
+
+    Returns:
+        None. Progress and the final outcome are recorded on the mission's
+        MissionStatus (core.state.store) for callers to poll.
+    """
+    status = store.get(mission_id)
+    resolved_macs = status.resolved_macs if status else {}
+    gpu_allocations = status.gpu_allocations if status else {}
 
     try:
         # --- 1. Networks ---------------------------------------------------
         store.update_state(mission_id, MissionState.DEPLOYING_NETWORKS)
-        api = ovn_client.connect(cluster_cfg["ovn"]["nb_connection"])
+        api = ovn_client.connect(deployment_cfg.ovn_nb_connection)
         networking.provision_networks(api, mission)
-        assigned_macs = networking.add_vm_ports(api, mission)
+        networking.add_vm_ports(api, mission, resolved_macs)
         store.log_step(mission_id, "networks", "ok", f"{len(mission.networks)} logical switches, {mission.total_nics()} ports")
 
         # --- 2. Storage ------------------------------------------------------
         store.update_state(mission_id, MissionState.CLONING_STORAGE)
-        storage_service.provision_mission_storage(mission, storage_ctx)
-        n_linked = sum(1 for vm in mission.vms.values() if vm.type.value == "linked_clone")
-        store.log_step(mission_id, "storage", "ok", f"{n_linked} linked-clone disk(s) provisioned")
+        resolved_revisions = storage_service.provision_mission_storage(mission, deployment_cfg.runtime, deployment_cfg.golden)
+        store.log_step(mission_id, "storage", "ok", f"cloned revisions: {resolved_revisions}")
 
         # --- 3. Define + start VMs -------------------------------------------
         store.update_state(mission_id, MissionState.DEFINING_VMS)
         host_addresses_by_vm: dict[str, str] = {}
-        gpu_pci_by_vm: dict[str, list[str]] = {}
+        gpu_mdev_by_vm: dict[str, str] = {}
 
         for vm_name, vm in mission.vms.items():
             host_name = mission.placement[vm_name]
-            host_address = hosts[host_name].address  # e.g. compute01.cluster.local
-            host_addresses_by_vm[vm_name] = host_name
+            host_address = hosts[host_name].address
+            host_addresses_by_vm[vm_name] = host_address
 
-            gpu_pci = None
-            if vm.gpu:
-                available = gpu_pool.get(host_name, [])
-                if not available:
-                    raise RuntimeError(f"no free GPU PCI device on host '{host_name}' for VM '{vm_name}'")
-                gpu_pci = [available.pop(0)]
-                gpu_pci_by_vm[vm_name] = gpu_pci
+            gpu_mdev_uuid = None
+            if vm.has_gpu:
+                gpu_mdev_uuid = gpu_allocations.get(vm_name)
+                if gpu_mdev_uuid is None:
+                    # Should not happen: register_mission's atomic
+                    # reserve_gpu_devices call would have raised at
+                    # registration time if no slice were available. This
+                    # is a defensive check, not the primary allocation path.
+                    raise RuntimeError(
+                        f"VM '{vm_name}' requires gpu_profile={vm.gpu_profile!r} but has no "
+                        f"GPU device reserved in this deployment's status -- this indicates a "
+                        f"bug in registration (reserve_gpu_devices should have caught this earlier)"
+                    )
+                gpu_mdev_by_vm[vm_name] = gpu_mdev_uuid
 
             compute.define_and_start_vm(
                 mission=mission,
                 vm_name=vm_name,
                 vm=vm,
-                macs=assigned_macs[vm_name],
+                macs=resolved_macs[vm_name],
                 host_address=host_address,
-                storage_ctx=storage_ctx,
-                gpu_pci_addresses=gpu_pci,
-                ovn_integration_bridge=cluster_cfg["ovn"]["integration_bridge"],
+                storage_ctx=deployment_cfg.runtime,
+                gpu_mdev_uuid=gpu_mdev_uuid,
+                ovn_integration_bridge=deployment_cfg.ovn_integration_bridge,
             )
             store.log_step(mission_id, f"define_vm:{vm_name}", "ok", host_name)
 
@@ -101,7 +113,7 @@ def deploy_mission(
         store.update_state(mission_id, MissionState.VALIDATING)
         missing_networks = validation.validate_networks(api, mission)
         report = validation.validate_mission_deployment(
-            mission, host_addresses_by_vm, assigned_macs, gpu_pci_by_vm,
+            mission, host_addresses_by_vm, resolved_macs, gpu_mdev_by_vm,
         )
         store.log_step(mission_id, "validation", "ok" if (report.ok and not missing_networks) else "error", str(report.as_dict()))
 

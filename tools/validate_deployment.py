@@ -54,6 +54,8 @@ def main() -> int:
 
     print(f"Mission: {status['name']} ({status['mission_id']})")
     print(f"State:   {status['state']}")
+    if status.get("mac_prefix"):
+        print(f"MAC prefix: {status['mac_prefix']} (this deployment's randomized OUI-style prefix)")
     if status.get("error"):
         print(f"Error:   {status['error']}")
 

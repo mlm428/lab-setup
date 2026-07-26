@@ -1,0 +1,35 @@
+[Unit]
+Description=Mission Compute Cluster Management API (Deliverable B)
+Documentation=file:///opt/mission-compute-cluster/README.md
+# Only makes sense once this host is bootstrapped -- libvirtd/OVS/OVN
+# need to already be up for the API to do anything useful, though it will
+# still start and serve GET /health without them.
+After=network-online.target libvirtd.service openvswitch.service ovn-controller.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Deliberately NOT root: create a dedicated, unprivileged service account
+# during your STIG remediation baseline (e.g. `useradd -r mission-mgmt`)
+# and grant it only what it actually needs -- membership in the libvirt
+# group for the socket, and read access to the Ceph/OVN credentials under
+# /etc/ceph and wherever your OVN NB connection's client cert lives, if
+# you're using TLS. Running this as root is unnecessary and avoidable.
+User=mission-mgmt
+Group=mission-mgmt
+
+WorkingDirectory=/opt/mission-compute-cluster/management
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/mission-compute-cluster/management/.venv/bin/uvicorn api.app:app --host 0.0.0.0 --port 8000
+
+Restart=on-failure
+RestartSec=5s
+
+# Basic hardening -- tighten further to match your STIG baseline
+# (ProtectSystem=strict + explicit ReadWritePaths, PrivateTmp, etc.) once
+# you've confirmed the exact filesystem paths this service needs
+# (/etc/ceph, its own venv, any TLS material for the OVN NB connection).
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

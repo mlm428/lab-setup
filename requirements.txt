@@ -7,7 +7,8 @@
 # a pip-installed libvirt-python with the system libvirtd is a common source
 # of "undefined symbol" errors, so this project deliberately keeps them out
 # of `pip install -r requirements.txt` and installs them via dnf instead
-# (see bootstrap/modules/packages.py and management/README section "Install").
+# (see bootstrap/modules/packages.py and this repo's top-level README.md's
+# "Quickstart" / "Deployment model" sections).
 # ---------------------------------------------------------------------------
 
 # --- management/ (Deliverable B: FastAPI mission service) -------------------

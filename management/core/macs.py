@@ -1,131 +1,199 @@
 """
-Static MAC address handling for mission VMs.
+MAC address resolution for mission deployments.
 
 OPERATIONAL REQUIREMENT (confirmed by the operator): guest software
 running inside mission VMs has MAC addresses hardcoded into its
-licensing/configuration, so the MAC for every interface on every VM is a
-value the operator determines ahead of time and writes into the mission
-definition's `macs:` section -- it is NOT something this system is free to
-invent. Every VM in management/mission_defs/mission_alpha.yaml carries an
-explicit `macs:` list for exactly this reason; assign_all_macs() below
-always uses those provided values when present.
+licensing/configuration. The operator therefore specifies, per VM
+interface, only the *last three octets* of that interface's MAC (e.g.
+"10:00:00") directly in the mission file (see
+management/mission_defs/README.md) -- that value must stay identical
+across every deployment of a given mission so the operator's own
+in-guest tooling can substring-match on it.
 
-The deterministic generator in this file (generate_mac /
-compute_vm_indices) is kept only as a fallback for the case where a
-mission genuinely doesn't care about specific addresses (e.g. ad hoc dev/
-test VMs with no licensing constraint) and so leaves a VM's `macs:` unset --
-it must never be relied on for any VM whose guest software is tied to a
-specific MAC. Even in that fallback role it still needs to be
-collision-free and reproducible (a destroy+redeploy of the same mission
-must not silently reassign different generated addresses), which is what
-the rest of this docstring documents.
+The *first* three octets (an OUI-like prefix) are NOT specified in the
+mission file at all. Instead, one random prefix is generated fresh for
+each individual deployment of a mission and applied to every interface in
+that deployment uniformly. This is what lets the operator run two (or
+more) concurrent deployments of the exact same mission definition, fully
+isolated from each other at the MAC layer, while every deployment's
+in-guest substring match on the configured suffix still finds the right
+interface within its own deployment's L2 domain.
 
-All addresses use QEMU/KVM's locally-administered OUI 52:54:00, the same
-prefix used throughout both source documents' examples: 52:54:00:<mission
-octet>:<vm index>:<interface index>.
+    deployment 1:  AA:BB:CC:10:00:00   (random prefix + configured suffix)
+    deployment 2:  XX:YY:ZZ:10:00:00   (different random prefix, same suffix)
 
-IMPORTANT: vm identity is a plain 0-based index into the mission's VM
-names sorted alphabetically -- NOT a hash. An earlier version of this
-module derived a 1-byte hash from the VM name, which collided (two VMs
-sharing the same MAC set) once applied to a 40-VM mission -- a 1-byte
-space (256 values) has a >90% chance of a collision by the birthday
-paradox at n=40. Indexing instead of hashing guarantees zero collisions
-for any mission with <= 256 VMs (a generous prototype-scale ceiling; see
-MAX_VMS_PER_MISSION), while staying just as deterministic and
-reproducible -- but again, this path is a fallback and mission_alpha.yaml
-does not exercise it: every one of its 240 addresses comes from the
-mission file's own `macs:` section.
+If an interface's mac_suffix is left unset in the mission file, a random
+suffix is generated for it instead -- appropriate only when that
+interface has no external substring-matching requirement, since an
+unspecified suffix is not guaranteed to repeat across redeploys.
+
+Prefixes are generated with the "locally administered, unicast" bits set
+(the same convention QEMU/KVM's own fixed 52:54:00 OUI follows), so
+randomly-assigned prefixes never collide with a real hardware vendor's
+assigned OUI range.
 """
 from __future__ import annotations
 
-import hashlib
+import random
 
-MAX_VMS_PER_MISSION = 256  # one byte of MAC address space for VM identity
+from .types import MissionSpec
+
+LOCALLY_ADMINISTERED_BIT = 0b0000_0010
+MULTICAST_BIT = 0b0000_0001
 
 
-def _mission_octet(mission_name: str) -> int:
+def _random_octet_triplet(rng: random.Random) -> str:
+    """Generate 3 random octets, formatted as e.g. 'a1:b2:c3'."""
+    return ":".join(f"{rng.randint(0, 255):02x}" for _ in range(3))
+
+
+def _force_locally_administered_unicast(first_octet_hex: str) -> str:
     """
-    One deterministic byte derived from the mission name, so MACs from
-    different missions don't collide even if they happen to place
-    same-named VMs (e.g. two missions both defining a VM called 'db01').
-    A 1-in-256 chance of two *missions* sharing this byte is an accepted
-    prototype-scale tradeoff (unlike VM identity, mission count is
-    expected to be small); OVN logical switches are mission-scoped
-    regardless, so an occasional shared mission octet does not create a
-    network-isolation problem, only a cosmetic MAC coincidence.
+    Set the locally-administered bit and clear the multicast bit on a MAC
+    address's first octet, so a randomly-generated prefix is a valid
+    unicast address in the locally-administered range (never collides
+    with a real vendor-assigned OUI) -- the same convention QEMU/KVM's own
+    fixed 52:54:00 prefix follows (0x52 = 0101_0010: bit 1 set, bit 0 clear).
     """
-    digest = hashlib.sha256(mission_name.encode("utf-8")).digest()
-    return digest[0]
+    value = int(first_octet_hex, 16)
+    value = (value & ~MULTICAST_BIT) | LOCALLY_ADMINISTERED_BIT
+    return f"{value:02x}"
 
 
-def compute_vm_indices(vm_names: list[str]) -> dict[str, int]:
+def random_prefix(existing_prefixes: set[str], rng: random.Random | None = None, max_attempts: int = 4096) -> str:
     """
-    Deterministic 0-based index per VM name: based on sorted order, so it
-    depends only on the *set* of VM names in the mission, not on dict/YAML
-    ordering, and is guaranteed collision-free (unlike a hash) as long as
-    the mission has <= MAX_VMS_PER_MISSION VMs.
+    Generate a random 3-octet MAC prefix that does not collide with any
+    prefix in `existing_prefixes` (the prefixes already reserved by other
+    currently-active mission deployments).
+
+    Args:
+        existing_prefixes: Prefixes ("aa:bb:cc" strings) already in use by
+            other active deployments -- see core/state.py's
+            MissionStore.active_mac_prefixes().
+        rng: Source of randomness; defaults to random.SystemRandom() (a
+            deterministic rng can be passed in tests for repeatable output).
+        max_attempts: Safety bound before giving up.
+
+    Returns:
+        A new prefix string, e.g. "4a:1e:9c", guaranteed not to be in
+        `existing_prefixes` and to have the locally-administered-unicast
+        bit pattern set on its first octet.
+
+    Raises:
+        RuntimeError: if no free prefix was found within `max_attempts`
+            tries (implies an implausible number of concurrent deployments
+            for a 3-octet, locally-administered space).
     """
-    if len(vm_names) > MAX_VMS_PER_MISSION:
-        raise ValueError(
-            f"mission has {len(vm_names)} VMs; this MAC scheme supports at "
-            f"most {MAX_VMS_PER_MISSION} per mission"
-        )
-    return {name: i for i, name in enumerate(sorted(vm_names))}
+    rng = rng or random.SystemRandom()
+    for _ in range(max_attempts):
+        triplet = _random_octet_triplet(rng)
+        b0, b1, b2 = triplet.split(":")
+        candidate = f"{_force_locally_administered_unicast(b0)}:{b1}:{b2}"
+        if candidate not in existing_prefixes:
+            return candidate
+    raise RuntimeError(
+        f"could not find a free MAC prefix after {max_attempts} attempts "
+        f"({len(existing_prefixes)} prefixes already in use)"
+    )
 
 
-def generate_mac(mission_name: str, vm_index: int, interface_index: int) -> str:
-    if not (0 <= vm_index < MAX_VMS_PER_MISSION):
-        raise ValueError(f"vm_index must be in [0, {MAX_VMS_PER_MISSION})")
-    if not (0 <= interface_index <= 255):
-        raise ValueError("interface_index must fit in a single byte (0-255)")
-    m = _mission_octet(mission_name)
-    return f"52:54:00:{m:02x}:{vm_index:02x}:{interface_index:02x}"
-
-
-def assign_all_macs(mission_name: str, mission_vms: dict[str, list], mission_macs_override: dict[str, list[str]] | None = None) -> dict[str, list[str]]:
+def random_suffix(existing_suffixes: set[str], rng: random.Random | None = None, max_attempts: int = 4096) -> str:
     """
-    Resolve the MAC list for every VM in a mission in one pass.
+    Generate a random 3-octet MAC suffix not already in `existing_suffixes`.
+    Used for an interface whose mission file left `mac_suffix` unset.
 
-    `mission_macs_override` is the mission YAML's per-VM `macs:` values
-    (operator-supplied, required whenever the guest's software/licensing
-    is tied to a specific MAC -- see this module's docstring). Any VM
-    present in `mission_macs_override` always gets exactly those
-    addresses, verbatim. Only a VM with no entry there falls back to the
-    deterministic generator below, and that fallback must not be used for
-    any VM with a MAC-locked guest.
+    Args:
+        existing_suffixes: Suffixes already assigned elsewhere in this
+            same mission deployment (across all VMs), so the result is
+            unique within the deployment.
+        rng: Source of randomness; see random_prefix.
+        max_attempts: Safety bound before giving up.
 
-    `mission_vms` maps vm_name -> its ordered interface list (only the
-    length matters, to size the generated fallback list when needed).
+    Returns:
+        A new suffix string, e.g. "7b:22:0f".
 
-    This MUST be the single place MACs are resolved for a mission --
-    callers (services/networking.py, services/compute.py) should thread
-    the returned dict through rather than recomputing per VM, both for
-    efficiency and so the OVN-pinned address and the libvirt <mac> always
-    agree by construction rather than by coincidence.
+    Raises:
+        RuntimeError: if no free suffix was found within `max_attempts` tries.
     """
-    overrides = mission_macs_override or {}
-    indices = compute_vm_indices(list(mission_vms.keys()))
+    rng = rng or random.SystemRandom()
+    for _ in range(max_attempts):
+        candidate = _random_octet_triplet(rng)
+        if candidate not in existing_suffixes:
+            return candidate
+    raise RuntimeError(
+        f"could not find a free MAC suffix after {max_attempts} attempts "
+        f"({len(existing_suffixes)} suffixes already in use in this deployment)"
+    )
 
+
+def resolve_mission_macs(
+    mission: MissionSpec,
+    existing_prefixes: set[str],
+    rng: random.Random | None = None,
+) -> tuple[str, dict[str, list[str]]]:
+    """
+    Resolve full 6-octet MAC addresses for every interface of every VM in
+    one mission deployment.
+
+    Generates a single random prefix for the whole deployment (unique
+    against every other currently-active deployment's prefix -- see
+    random_prefix), then combines it with each interface's configured
+    `mac_suffix` (falling back to a freshly generated random suffix for
+    any interface that left it unset) to produce the address libvirt/OVN
+    actually use.
+
+    Args:
+        mission: The mission being deployed. Not mutated.
+        existing_prefixes: Prefixes already reserved by other active
+            deployments (see core/state.py's MissionStore.active_mac_prefixes()).
+        rng: Source of randomness; see random_prefix.
+
+    Returns:
+        (prefix, {vm_name: [full_mac, ...]}) -- the prefix chosen for this
+        deployment, and every VM's resolved MAC list in the same order as
+        that VM's interfaces (VMSpec.interface_names()).
+
+    Raises:
+        ValueError: if two different VMs in the mission were configured
+            with the same mac_suffix -- since the prefix is identical for
+            the whole deployment, that would produce two interfaces with
+            an identical full MAC. (A single VM reusing a suffix across
+            its own interfaces is already rejected earlier, by
+            VMSpec.__post_init__.)
+        RuntimeError: if a free prefix or suffix could not be found.
+    """
+    rng = rng or random.SystemRandom()
+    prefix = random_prefix(existing_prefixes, rng)
+
+    used_suffixes: set[str] = set()
     result: dict[str, list[str]] = {}
-    for vm_name, interfaces in mission_vms.items():
-        if vm_name in overrides:
-            provided = overrides[vm_name]
-            if len(provided) != len(interfaces):
-                raise ValueError(
-                    f"VM '{vm_name}': provided {len(provided)} MAC(s) but has "
-                    f"{len(interfaces)} interface(s)"
-                )
-            result[vm_name] = list(provided)
-        else:
-            vm_idx = indices[vm_name]
-            result[vm_name] = [
-                generate_mac(mission_name, vm_idx, i) for i in range(len(interfaces))
-            ]
-    return result
+    conflicts: list[str] = []
+
+    for vm_name, vm in mission.vms.items():
+        macs: list[str] = []
+        for net_name, iface in vm.interfaces.items():
+            suffix = iface.mac_suffix
+            if suffix is None:
+                suffix = random_suffix(used_suffixes, rng)
+            elif suffix in used_suffixes:
+                conflicts.append(f"{vm_name}/{net_name} (suffix {suffix})")
+            used_suffixes.add(suffix)
+            macs.append(f"{prefix}:{suffix}")
+        result[vm_name] = macs
+
+    if conflicts:
+        raise ValueError(
+            f"mission '{mission.name}': duplicate mac_suffix used by more than one "
+            f"interface across different VMs -- every interface in a deployment needs "
+            f"a distinct suffix, since the {prefix} prefix is shared by the whole "
+            f"deployment and identical suffixes would produce identical MACs: {conflicts}"
+        )
+
+    return prefix, result
 
 
 def validate_no_duplicate_macs(all_macs: list[str]) -> list[str]:
-    """Return any MAC addresses that appear more than once across a mission."""
+    """Return any MAC addresses that appear more than once in `all_macs`."""
     seen: dict[str, int] = {}
     for mac in all_macs:
         seen[mac] = seen.get(mac, 0) + 1

@@ -1,0 +1,67 @@
+# =============================================================================
+# SINGLE SOURCE OF TRUTH for storage configuration -- used by bootstrap/
+# (pool setup) and management/ (RBD clone / qcow2 backing-file operations).
+#
+# `runtime` and `golden` are DELIBERATELY separate stores, per requirement:
+# runtime VM disks (linked clones) can live on this cluster's local Ceph
+# RBD while golden (source) images are read from somewhere else entirely
+# -- a remote Ceph cluster, a different pool on the same cluster, or a
+# plain filesystem mount (e.g. an NFS export). Provisioning only ever
+# WRITES to `runtime`; it only ever READS from `golden`.
+# =============================================================================
+
+runtime:
+  backend: ceph_rbd            # ceph_rbd | local_qcow2 (per-host override in config/hosts.yaml)
+  ceph:
+    client_id: libvirt
+    keyring_path: /etc/ceph/ceph.client.libvirt.keyring
+    conf_path: /etc/ceph/ceph.conf
+    pool: mission-runtime       # linked-clone VM disks live HERE ONLY -- never golden images
+    pool_pg_num: 128
+    replica_size: 3
+    libvirt_secret_uuid: "5e4b8c1a-9f2d-4e3a-8b7a-1c2d3e4f5a6b"
+  local_qcow2:
+    pool_name: default
+    pool_path: /var/lib/libvirt/images
+
+golden:
+  # `source` selects where provisioning reads golden images FROM. All
+  # three are supported by clients/ceph_client.py / services/storage.py;
+  # switch this one value to change where golden images live without
+  # touching any mission definition. NOTE on clone semantics: a true
+  # space-efficient copy-on-write clone is only possible when golden and
+  # runtime share the same Ceph cluster (ceph_rbd_local, cross-pool clone
+  # v2). ceph_rbd_remote and mount sources are copied in full into the
+  # runtime pool before boot -- still correct, just not thin-provisioned.
+  # See services/storage.py's module docstring for details.
+  source: ceph_rbd_remote        # ceph_rbd_local | ceph_rbd_remote | mount
+  ceph_rbd_local:
+    pool: golden-images           # same cluster as `runtime`, different pool
+  ceph_rbd_remote:
+    conf_path: /etc/ceph/golden.ceph.conf
+    client_id: golden-reader
+    keyring_path: /etc/ceph/ceph.client.golden-reader.keyring
+    pool: golden-images
+  mount:
+    path: /mnt/golden-images       # e.g. an NFS export mounted read-only on every compute host
+
+  # Golden image catalog: a linked-clone VM's mission entry references an
+  # image by `image:` name and optional `image_revision:` (see
+  # management/mission_defs/README.md). Provisioning looks both up here to
+  # find the specific, versioned artifact to clone/copy from, and records
+  # the resolved revision in mission validation output / step logs so you
+  # can always tell which build a given mission was actually cloned from.
+  # If a mission omits `image_revision:`, `default_revision` is used.
+  images:
+    rhel9-db-golden:
+      default_revision: Alpha
+      revisions:
+        Alpha:
+          filename: rhel9-db-golden-alpha.qcow2
+          snapshot: golden-snap-alpha
+    rhel9-app-golden:
+      default_revision: Alpha
+      revisions:
+        Alpha:
+          filename: rhel9-app-golden-alpha.qcow2
+          snapshot: golden-snap-alpha

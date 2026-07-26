@@ -1,7 +1,7 @@
 """
 Renders a libvirt domain XML document for a single VM, from its VMSpec
-plus mission/cluster context (assigned MACs, storage backend, GPU PCI
-addresses). This is the direct implementation of the design doc's:
+plus mission/cluster context (assigned MACs, storage backend, GPU mdev
+UUID). This is the direct implementation of the design doc's:
 
     domain_xml = render_template("vm.xml.j2", **vm_params)
     dom = conn.defineXML(domain_xml)
@@ -33,6 +33,7 @@ MISSION_UUID_NAMESPACE = uuid_lib.UUID("6f9169d4-1b40-4d6f-9d2a-8f6c9a2e6b90")
 
 
 def deterministic_vm_uuid(mission_name: str, vm_name: str) -> str:
+    """Deterministic libvirt domain UUID for (mission_name, vm_name), stable across redeploys."""
     return str(uuid_lib.uuid5(MISSION_UUID_NAMESPACE, f"{mission_name}:{vm_name}"))
 
 
@@ -48,10 +49,12 @@ def switch_name(mission_name: str, network_name: str) -> str:
 
 
 def router_name(mission_name: str) -> str:
+    """Mission-scoped OVN logical router name."""
     return f"{mission_name}-router"
 
 
 def router_port_name(mission_name: str, network_name: str) -> str:
+    """Mission-scoped name for the router-side port connecting to one of the mission's networks."""
     return f"{mission_name}-{network_name}-rp"
 
 
@@ -59,9 +62,9 @@ def port_name(mission_name: str, vm_name: str, network_name: str) -> str:
     """
     OVN logical switch port name for this VM's interface on this network.
     Must match exactly what management/services/networking.py passes to
-    `ovn-nbctl lsp-add` / `ovsdbapp`'s ls_add API, since the libvirt
-    <virtualport> interfaceid references this same string to bind the OVS
-    port to the OVN logical port.
+    ovsdbapp's lsp_add, since the libvirt <virtualport> interfaceid
+    references this same string to bind the OVS port to the OVN logical
+    port.
 
     Scoped by mission name: OVN's Logical_Switch_Port table is global (not
     per-switch), so two different missions that happen to both define a VM
@@ -71,43 +74,35 @@ def port_name(mission_name: str, vm_name: str, network_name: str) -> str:
     return f"{mission_name}-{vm_name}-{network_name}"
 
 
-def parse_pci_address(address: str) -> dict:
-    """
-    Parse a PCI address string like '0000:83:00.0' into the
-    domain/bus/slot/function components libvirt's hostdev XML needs.
-    Accepts both '0000:83:00.0' and '83:00.0' (domain defaults to '0000').
-    """
-    addr = address.strip()
-    if addr.count(":") == 2:
-        domain, bus, rest = addr.split(":")
-    elif addr.count(":") == 1:
-        domain = "0000"
-        bus, rest = addr.split(":")
-    else:
-        raise ValueError(f"unrecognized PCI address format: {address!r}")
-
-    if "." not in rest:
-        raise ValueError(f"unrecognized PCI address format: {address!r}")
-    slot, function = rest.split(".")
-    return {
-        "domain": domain.zfill(4),
-        "bus": bus.zfill(2),
-        "slot": slot.zfill(2),
-        "function": function.zfill(1),
-    }
-
-
 @dataclass
 class StorageContext:
-    backend: str                      # "ceph_rbd" | "local_qcow2"
-    ceph_pool: str = "mission-images"
+    """
+    Storage backend selection + connection info needed to render a VM's
+    disk (or lack thereof) and to actually provision it
+    (services/storage.py). Runtime (where linked-clone VM disks live) and
+    golden (where source images are read from) are deliberately separate
+    -- see config/storage.yaml.
+
+    Attributes:
+        backend: "ceph_rbd" | "local_qcow2" -- where THIS VM's disk (the
+            clone, not the golden source) lives.
+        ceph_pool: Runtime pool name (only used when backend=="ceph_rbd").
+        ceph_client_id: Ceph client id used for the runtime pool's cephx auth.
+        ceph_secret_uuid: libvirt secret UUID holding that client's cephx key.
+        ceph_monitors: Runtime cluster's monitor list, [{"name":..,"port":..}, ...].
+        local_qcow2_dir: Directory holding qcow2 clone files (only used
+            when backend=="local_qcow2").
+    """
+    backend: str
+    ceph_pool: str = "mission-runtime"
     ceph_client_id: str = "libvirt"
     ceph_secret_uuid: str = ""
-    ceph_monitors: list[dict] | None = None   # [{"name": ..., "port": ...}, ...]
+    ceph_monitors: list[dict] | None = None
     local_qcow2_dir: str = "/var/lib/libvirt/images"
 
 
 def _env() -> Environment:
+    """Build the Jinja2 environment used to render vm.xml.j2 (StrictUndefined so a missing template var fails loudly, not silently)."""
     return Environment(
         loader=FileSystemLoader(str(TEMPLATES_DIR)),
         undefined=StrictUndefined,
@@ -122,17 +117,44 @@ def render_domain_xml(
     vm: VMSpec,
     macs: list[str],
     storage: StorageContext,
-    gpu_pci_addresses: list[str] | None = None,
+    gpu_mdev_uuid: str | None = None,
     ovn_integration_bridge: str = "br-int",
 ) -> str:
-    if len(macs) != len(vm.interfaces):
+    """
+    Render a complete libvirt domain XML document for one VM.
+
+    Args:
+        mission_name: Owning mission's name (used for OVN naming + UUID derivation).
+        vm_name: This VM's name within the mission.
+        vm: The VM's spec (type, cpu, memory, interfaces, gpu_profile, etc.).
+        macs: Fully-resolved MAC addresses, one per interface, in the same
+            order as vm.interface_names() -- see core/macs.py:resolve_mission_macs.
+        storage: Where to source this VM's disk from (ignored for pxe VMs).
+        gpu_mdev_uuid: The specific MIG/vGPU mediated-device UUID to
+            attach, required if vm.has_gpu is True and forbidden
+            otherwise (see config/hosts.yaml's gpu_devices, matched by
+            vm.gpu_profile at deploy time).
+        ovn_integration_bridge: Host's OVS integration bridge name (every
+            NIC binds to this bridge, with OVN doing the logical
+            switching -- see port_name's docstring).
+
+    Returns:
+        A pretty-printed, well-formed libvirt domain XML string.
+
+    Raises:
+        ValueError: if `macs` doesn't have exactly one entry per
+            interface, or if vm.has_gpu and gpu_mdev_uuid disagree about
+            whether this VM needs a GPU.
+    """
+    interface_names = vm.interface_names()
+    if len(macs) != len(interface_names):
         raise ValueError(
-            f"VM '{vm_name}': {len(macs)} MAC(s) provided for {len(vm.interfaces)} interface(s)"
+            f"VM '{vm_name}': {len(macs)} MAC(s) provided for {len(interface_names)} interface(s)"
         )
-    if vm.gpu and not gpu_pci_addresses:
-        raise ValueError(f"VM '{vm_name}': gpu=true but no gpu_pci_addresses supplied")
-    if not vm.gpu and gpu_pci_addresses:
-        raise ValueError(f"VM '{vm_name}': gpu_pci_addresses supplied but gpu=false")
+    if vm.has_gpu and not gpu_mdev_uuid:
+        raise ValueError(f"VM '{vm_name}': gpu_profile={vm.gpu_profile!r} but no gpu_mdev_uuid supplied")
+    if not vm.has_gpu and gpu_mdev_uuid:
+        raise ValueError(f"VM '{vm_name}': gpu_mdev_uuid supplied but this VM has no gpu_profile")
 
     interfaces = [
         {
@@ -140,10 +162,10 @@ def render_domain_xml(
             "mac": mac,
             "port_name": port_name(mission_name, vm_name, net_name),
         }
-        for net_name, mac in zip(vm.interfaces, macs)
+        for net_name, mac in zip(interface_names, macs)
     ]
 
-    gpu_devices = [parse_pci_address(addr) for addr in (gpu_pci_addresses or [])]
+    gpu_devices = [{"mdev_uuid": gpu_mdev_uuid}] if gpu_mdev_uuid else []
 
     template = _env().get_template("vm.xml.j2")
     raw_xml = template.render(
@@ -160,7 +182,7 @@ def render_domain_xml(
         ceph_client_id=storage.ceph_client_id,
         ceph_secret_uuid=storage.ceph_secret_uuid,
         ceph_monitors=storage.ceph_monitors or [],
-        local_qcow2_path=f"{storage.local_qcow2_dir}/{vm_name}.qcow2",
+        local_qcow2_path=f"{storage.local_qcow2_dir}/{vm_name}_clone.qcow2",
     )
     return _pretty_print(raw_xml)
 

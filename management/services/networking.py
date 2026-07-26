@@ -12,25 +12,27 @@ ports with static MAC addresses. Mirrors the design doc's:
 
 ...via ovsdbapp instead of shelling out to ovn-nbctl, and with every name
 mission-scoped (see core/xml_render.py's switch_name/router_name/
-port_name) so multiple missions can safely coexist on the same OVN
-Northbound DB.
+port_name) so multiple missions -- or multiple concurrent *deployments* of
+the same mission -- can safely coexist on the same OVN Northbound DB.
 """
 from __future__ import annotations
 
 import hashlib
 
 from clients import ovn_client
-from core.macs import assign_all_macs
 from core.types import MissionSpec
 from core.xml_render import port_name, router_name, router_port_name, switch_name
 
-# Simple deterministic /24 allocation per network for the mission's
-# logical router ports -- the design doc's own example
-# (`192.168.100.1/24`) is a single hardcoded value; we derive one octet
-# per network so a mission with N networks gets N distinct subnets
-# without operator input. This is prototype-scope: a real deployment would
-# want this driven by IPAM.
+
 def _router_gateway_cidr(vlan_id: int) -> str:
+    """
+    Derive a deterministic /24 gateway CIDR for a mission network's router
+    port, one octet per VLAN id (e.g. VLAN 110 -> 10.110.0.1/24). The
+    design doc's own example (`192.168.100.1/24`) is a single hardcoded
+    value; this generalizes it so a mission with N networks gets N
+    distinct subnets without operator input. Prototype-scope: a real
+    deployment would want this driven by IPAM instead.
+    """
     third_octet = vlan_id % 256
     return f"10.{third_octet}.0.1/24"
 
@@ -38,9 +40,9 @@ def _router_gateway_cidr(vlan_id: int) -> str:
 def _router_port_mac(mission_name: str, network_name: str) -> str:
     """
     Deterministic MAC for a mission's router port on one network. Uses a
-    separate hash (not core/macs.py's VM-index scheme, which is sized and
-    reserved for actual VM NICs) with a fixed 0xff marker octet so router
-    ports are trivially distinguishable from VM NICs when reading a
+    separate hash (not core/macs.py's per-deployment prefix scheme, which
+    is reserved for actual VM NICs) with a fixed 0xff marker octet so
+    router ports are trivially distinguishable from VM NICs when reading a
     packet capture; a mission has at most a handful of these, so a 2-byte
     hash space is more than enough to avoid collisions between them.
     """
@@ -50,9 +52,17 @@ def _router_port_mac(mission_name: str, network_name: str) -> str:
 
 def provision_networks(api, mission: MissionSpec) -> dict[str, str]:
     """
-    Creates one logical switch per mission network, a logical router, and
-    connects every switch to the router. Returns {network_name: switch_name}
-    for callers (e.g. add_vm_ports) that need the OVN-side switch name.
+    Create one OVN logical switch per mission network, a logical router,
+    and connect every switch to the router.
+
+    Args:
+        api: A connected ovsdbapp OVN Northbound API object (see
+            clients/ovn_client.py:connect).
+        mission: The mission whose `networks` to provision.
+
+    Returns:
+        {network_name: ovn_switch_name} for callers (e.g. add_vm_ports)
+        that need the OVN-side switch name.
     """
     router = router_name(mission.name)
     ovn_client.ensure_logical_router(api, router)
@@ -77,33 +87,47 @@ def provision_networks(api, mission: MissionSpec) -> dict[str, str]:
     return switches
 
 
-def add_vm_ports(api, mission: MissionSpec) -> dict[str, list[str]]:
+def add_vm_ports(api, mission: MissionSpec, resolved_macs: dict[str, list[str]]) -> None:
     """
-    For every VM, create one OVN logical port per interface and pin its
-    MAC address. Returns {vm_name: [mac, ...]} (same order as
-    vm.interfaces) so the caller (workers/deploy.py) can pass the same
-    MAC list into compute.define_and_start_vm without recomputing it --
-    MACs for the whole mission are computed exactly once, here, by
-    core.macs.assign_all_macs.
-    """
-    interfaces_by_vm = {name: vm.interfaces for name, vm in mission.vms.items()}
-    overrides = {name: vm.macs for name, vm in mission.vms.items() if vm.macs}
-    assigned_macs = assign_all_macs(mission.name, interfaces_by_vm, overrides)
+    Create one OVN logical port per VM interface and pin its already-
+    resolved MAC address.
 
+    Args:
+        api: A connected ovsdbapp OVN Northbound API object.
+        mission: The mission whose VMs to create ports for.
+        resolved_macs: {vm_name: [mac, ...]} in the same order as each
+            VM's interface_names() -- computed once at mission
+            registration by core/macs.py:resolve_mission_macs (see
+            core/state.py:MissionStore.register_deployment) and
+            threaded through unchanged, so this function and
+            services/compute.py's define_and_start_vm always agree on
+            every interface's address by construction.
+
+    Returns:
+        None.
+    """
     for vm_name, vm in mission.vms.items():
-        macs = assigned_macs[vm_name]
-        for net_name, mac in zip(vm.interfaces, macs):
+        macs = resolved_macs[vm_name]
+        for (net_name, _iface), mac in zip(vm.interfaces.items(), macs):
             switch = switch_name(mission.name, net_name)
             port = port_name(mission.name, vm_name, net_name)
             ovn_client.add_vm_port(api, switch, port, mac)
-    return assigned_macs
 
 
 def teardown_mission_networking(api, mission: MissionSpec) -> None:
-    """Idempotent teardown: remove every VM port, every switch, and the
-    mission's router. Order matters -- ports before switches."""
+    """
+    Idempotently remove every VM port, every switch, and the mission's
+    router for one deployment. Order matters -- ports before switches.
+
+    Args:
+        api: A connected ovsdbapp OVN Northbound API object.
+        mission: The mission (deployment) to tear down networking for.
+
+    Returns:
+        None.
+    """
     for vm_name, vm in mission.vms.items():
-        for net_name in vm.interfaces:
+        for net_name in vm.interface_names():
             port = port_name(mission.name, vm_name, net_name)
             ovn_client.remove_vm_port(api, port)
 

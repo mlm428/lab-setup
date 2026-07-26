@@ -13,7 +13,7 @@ task, or by hand over SSH) and to be safely re-run: every module checks
 current state before mutating anything.
 
 Usage:
-    sudo ./bootstrap.py --host compute01 [--config-dir config] [--dry-run]
+    sudo ./bootstrap.py --host compute01 [--config-dir ../config] [--dry-run]
     sudo ./bootstrap.py --host compute01 --check-only
     sudo ./bootstrap.py --host compute01 --skip-gpu
 
@@ -45,7 +45,7 @@ def load_yaml(path: Path) -> dict:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Bootstrap a RHEL host for the mission compute cluster.")
     parser.add_argument("--host", required=True, help="Host name as it appears in hosts.yaml")
-    parser.add_argument("--config-dir", default=str(Path(__file__).parent / "config"), help="Directory containing hosts.yaml, cluster.yaml, storage.yaml")
+    parser.add_argument("--config-dir", default=str(Path(__file__).parent.parent / "config"), help="Directory containing hosts.yaml, cluster.yaml, storage.yaml (defaults to the repo's top-level config/, the single source of truth shared with management/)")
     parser.add_argument("--dry-run", action="store_true", help="Print what would be done without changing the host")
     parser.add_argument("--check-only", action="store_true", help="Only run validation checks, do not change anything")
     parser.add_argument("--skip-gpu", action="store_true", help="Skip IOMMU/VFIO/GPU discovery steps")
@@ -85,13 +85,13 @@ def main() -> int:
 
         storage.configure_storage(ctx, storage_cfg, storage_backend)
 
-        if not args.skip_gpu and host_entry.get("gpus", 0) > 0:
+        if not args.skip_gpu and len(host_entry.get("gpu_devices", [])) > 0:
             gpu.ensure_iommu_kernel_args(ctx, cluster_cfg)
             gpu.load_vfio_modules(ctx, cluster_cfg)
             discovered = gpu.discover_gpus(ctx)
-            log.info("bootstrap: discovered GPUs (record PCI addresses in hosts.yaml): %s", discovered)
+            log.info("bootstrap: discovered physical GPU adapters (partition into MIG/vGPU slices, then run scripts/enumerate_mdev_gpus.sh and record UUIDs in config/hosts.yaml): %s", discovered)
         else:
-            log.info("bootstrap: skipping GPU setup (skip_gpu=%s, gpus=%s)", args.skip_gpu, host_entry.get("gpus", 0))
+            log.info("bootstrap: skipping GPU setup (skip_gpu=%s, gpu_devices=%s)", args.skip_gpu, host_entry.get("gpu_devices", []))
 
         cockpit.enable_cockpit(ctx)
 
