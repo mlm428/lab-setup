@@ -175,6 +175,21 @@ class TestHostSpec(unittest.TestCase):
         host = HostSpec(name="h1", cpus=64, memory_mb=262144)
         self.assertEqual(host.available_profiles(), {})
 
+    def test_available_profiles_excludes_reserved_uuids(self):
+        host = HostSpec(
+            name="h1", cpus=64, memory_mb=262144,
+            gpu_devices=[
+                GpuDeviceSpec(profile="H100-MIG-3g.40gb", mdev_uuid="u1"),
+                GpuDeviceSpec(profile="H100-MIG-3g.40gb", mdev_uuid="u2"),
+                GpuDeviceSpec(profile="L4-vGPU-4Q", mdev_uuid="u3"),
+            ],
+        )
+        self.assertEqual(host.available_profiles(exclude_uuids={"u1"}), {"H100-MIG-3g.40gb": 1, "L4-vGPU-4Q": 1})
+
+    def test_available_profiles_all_excluded_shows_zero(self):
+        host = HostSpec(name="h1", cpus=64, memory_mb=262144, gpu_devices=[GpuDeviceSpec(profile="X", mdev_uuid="u1")])
+        self.assertEqual(host.available_profiles(exclude_uuids={"u1"}), {})
+
 
 class TestMissionStatusStateMachine(unittest.TestCase):
     def test_fail_transitions_to_error_and_records_message(self):

@@ -15,6 +15,7 @@ from core.xml_render import StorageContext, render_domain_xml
 
 def define_and_start_vm(
     mission: MissionSpec,
+    mission_id: str,
     vm_name: str,
     vm: VMSpec,
     macs: list[str],
@@ -22,12 +23,19 @@ def define_and_start_vm(
     storage_ctx: StorageContext,
     gpu_mdev_uuid: str | None,
     ovn_integration_bridge: str = "br-int",
+    ssh_user: str = "root",
 ):
     """
     Render this VM's domain XML and define+start it on its placed host.
 
     Args:
         mission: Owning mission (for OVN naming + UUID derivation).
+        mission_id: This specific deployment's id -- embedded in the
+            rendered domain XML's <metadata> block (alongside mission
+            name and VM name) so a live cluster scan can always trace a
+            running VM back to its mission deployment, even if this
+            service's own database is lost or replaced -- see
+            services/reconciliation.py.
         vm_name: This VM's name.
         vm: The VM's spec.
         macs: Already-resolved MAC addresses in interface order (see
@@ -42,6 +50,9 @@ def define_and_start_vm(
         gpu_mdev_uuid: The specific MIG/vGPU mdev UUID to attach, or None
             for a VM with no GPU requirement.
         ovn_integration_bridge: Host's OVS integration bridge name.
+        ssh_user: Non-root SSH user for the libvirt connection (see
+            config/hosts.yaml's management_ssh_user and
+            clients/libvirt_client.py:connect's docstring).
 
     Returns:
         The libvirt domain object.
@@ -54,6 +65,7 @@ def define_and_start_vm(
     """
     domain_xml = render_domain_xml(
         mission_name=mission.name,
+        mission_id=mission_id,
         vm_name=vm_name,
         vm=vm,
         macs=macs,
@@ -61,38 +73,42 @@ def define_and_start_vm(
         gpu_mdev_uuid=gpu_mdev_uuid,
         ovn_integration_bridge=ovn_integration_bridge,
     )
-    conn = libvirt_client.connect(host_address)
+    conn = libvirt_client.connect(host_address, ssh_user=ssh_user)
     try:
         return libvirt_client.define_and_start(conn, domain_xml)
     finally:
         conn.close()
 
 
-def destroy_vm(vm_name: str, host_address: str) -> None:
+def destroy_vm(vm_name: str, host_address: str, ssh_user: str = "root") -> None:
     """
     Idempotently destroy and undefine one VM by name on the given host.
 
     Args:
         vm_name: The VM's libvirt domain name.
         host_address: Real network address of the host it's running on.
+        ssh_user: Non-root SSH user for the libvirt connection (see
+            config/hosts.yaml's management_ssh_user).
 
     Returns:
         None. Silently succeeds if the VM is already gone (see
         clients.libvirt_client.destroy_and_undefine).
     """
-    conn = libvirt_client.connect(host_address)
+    conn = libvirt_client.connect(host_address, ssh_user=ssh_user)
     try:
         libvirt_client.destroy_and_undefine(conn, vm_name)
     finally:
         conn.close()
 
 
-def list_running_vm_names(host_addresses: list[str]) -> list[str]:
+def list_running_vm_names(host_addresses: list[str], ssh_user: str = "root") -> list[str]:
     """
     Aggregate VM names across every given compute host.
 
     Args:
         host_addresses: Real network addresses of the hosts to query.
+        ssh_user: Non-root SSH user for the libvirt connection (see
+            config/hosts.yaml's management_ssh_user).
 
     Returns:
         Combined list of every domain name found across all given hosts
@@ -101,7 +117,7 @@ def list_running_vm_names(host_addresses: list[str]) -> list[str]:
     """
     names: list[str] = []
     for host in host_addresses:
-        conn = libvirt_client.connect(host)
+        conn = libvirt_client.connect(host, ssh_user=ssh_user)
         try:
             names.extend(libvirt_client.list_domain_names(conn))
         finally:

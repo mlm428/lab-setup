@@ -26,11 +26,17 @@ class DeploymentConfig:
         ovn_integration_bridge: Host-side OVS bridge every VM NIC binds to (normally "br-int").
         runtime: Runtime (per-VM clone disk) storage backend/connection info.
         golden: Golden (source) image backend/connection info + catalog.
+        management_ssh_user: Non-root SSH user the management service uses
+            to reach every compute host's libvirt socket (see
+            config/hosts.yaml's management_ssh_user and
+            clients/libvirt_client.py:connect's docstring for why this is
+            deliberately not "root").
     """
     ovn_nb_connection: str
     ovn_integration_bridge: str
     runtime: StorageContext
     golden: GoldenImageSource
+    management_ssh_user: str = "root"
 
 
 def load_deployment_config(config_dir: Path | None = None) -> DeploymentConfig:
@@ -78,4 +84,5 @@ def load_deployment_config(config_dir: Path | None = None) -> DeploymentConfig:
         ovn_integration_bridge=ovn_central.get("integration_bridge", "br-int"),
         runtime=runtime,
         golden=golden,
+        management_ssh_user=hosts_cfg.get("management_ssh_user", "root"),
     )

@@ -71,7 +71,7 @@ class TestMissionAlphaPipeline(unittest.TestCase):
                 gpu_mdev = available.pop(idx).mdev_uuid
 
             xml_str = render_domain_xml(
-                self.mission.name, vm_name, vm, macs[vm_name], self.deployment_cfg.runtime, gpu_mdev_uuid=gpu_mdev,
+                self.mission.name, "test-deployment-id", vm_name, vm, macs[vm_name], self.deployment_cfg.runtime, gpu_mdev_uuid=gpu_mdev,
             )
             root = ET.fromstring(xml_str)
             self.assertEqual(len(root.findall("./devices/interface")), 6, vm_name)

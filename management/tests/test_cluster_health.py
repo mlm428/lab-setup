@@ -90,7 +90,7 @@ class TestScanCluster(unittest.TestCase):
         self.assertEqual(len(result["hosts"]), 2)
 
     def test_one_host_down_marks_overall_not_ok(self):
-        def fake_check(host):
+        def fake_check(host, ssh_user="root"):
             if host.name == "h1":
                 return {"host": "h1", "reachable": False, "libvirt_ok": None, "vm_count": None, "detail": "down"}
             return {"host": host.name, "reachable": True, "libvirt_ok": True, "vm_count": 0, "detail": ""}

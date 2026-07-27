@@ -33,7 +33,7 @@ update and a real risk of them drifting out of sync.
 | `cpu` | yes | vCPU count. |
 | `memory` | yes | MiB. |
 | `gpu` | no | `{profile: "<name>"}` -- see "GPU profiles" below. Omit entirely for no GPU. |
-| `interfaces` | yes | `{network_name: {mac_suffix: "..."} }` -- see "MAC addresses" below. |
+| `interfaces` | yes | `{network_name: {mac_suffix: "..."} }` -- see "MAC addresses" below. Any number of interfaces is supported (1, 8, or more) -- there's no fixed NIC count; every VM simply gets one interface per entry here, in order. |
 
 ## MAC addresses: why only three octets, and why they live per-interface
 

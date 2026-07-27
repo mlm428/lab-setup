@@ -149,6 +149,7 @@ class TestDeployMission(unittest.TestCase):
 
         m_define.assert_called_once()
         self.assertEqual(m_define.call_args.kwargs["gpu_mdev_uuid"], "uuid-abc")
+        self.assertEqual(m_define.call_args.kwargs["mission_id"], status.mission_id)
         self.assertEqual(self.store.get(status.mission_id).state, MissionState.RUNNING)
 
     def test_no_matching_gpu_profile_fails_at_registration_not_deploy(self):
@@ -232,6 +233,109 @@ class TestDeployMission(unittest.TestCase):
             self._register(mission_b, hosts)
 
 
+class TestAutomaticRollback(unittest.TestCase):
+    def setUp(self):
+        self.store = MissionStore()
+        self.store_patch = mock.patch.object(deploy_mod, "store", self.store)
+        self.store_patch.start()
+        self.addCleanup(self.store_patch.stop)
+
+    def _register(self, mission, hosts, prefix="aa:bb:cc"):
+        def fake_mac_resolver(m, existing):
+            return prefix, {name: [f"{prefix}:{i:02x}:{j:02x}:00" for j in range(len(vm.interfaces))] for i, (name, vm) in enumerate(m.vms.items())}
+        return self.store.register_deployment(mission.name, mission, hosts, fake_mac_resolver, reserve_gpu_devices)
+
+    def test_failure_triggers_full_rollback_and_frees_resources(self):
+        vm = VMSpec(name="render01", type=VMType.PXE, cpu=8, memory_mb=32768, interfaces=ifaces("control"), gpu_profile="X")
+        mission = MissionSpec(name="M", networks={"control": 100}, vms={"render01": vm}, placement={"render01": "h1"})
+        hosts = {"h1": HostSpec(name="h1", cpus=64, memory_mb=262144, address="h1.cluster.local", gpu_devices=[GpuDeviceSpec(profile="X", mdev_uuid="uuid-1")])}
+        status = self._register(mission, hosts)
+        self.assertEqual(self.store.active_mac_prefixes(), {"aa:bb:cc"})
+        self.assertEqual(self.store.active_gpu_allocations(), {"uuid-1"})
+
+        with mock.patch.object(deploy_mod, "ovn_client"), \
+             mock.patch.object(deploy_mod.networking, "provision_networks", side_effect=RuntimeError("OVN down")), \
+             mock.patch.object(deploy_mod.networking, "teardown_mission_networking") as m_net_teardown, \
+             mock.patch.object(deploy_mod.storage_service, "teardown_mission_storage") as m_storage_teardown, \
+             mock.patch.object(deploy_mod.compute, "destroy_vm") as m_destroy:
+            deploy_mod.deploy_mission(status.mission_id, mission, hosts, make_deployment_cfg())
+
+        final = self.store.get(status.mission_id)
+        self.assertEqual(final.state, MissionState.ROLLED_BACK)
+        self.assertIn("OVN down", final.error)  # original failure still visible in history
+        m_destroy.assert_called_once_with("render01", "h1.cluster.local", ssh_user="root")
+        m_net_teardown.assert_called_once()
+        m_storage_teardown.assert_called_once()
+        # Resources freed -- a resubmit of the same mission would not be blocked.
+        self.assertEqual(self.store.active_mac_prefixes(), set())
+        self.assertEqual(self.store.active_gpu_allocations(), set())
+
+    def test_rollback_calls_are_safe_even_if_nothing_was_created_yet(self):
+        # Failure at the very first step (networking) -- no VMs were ever
+        # defined, no storage cloned. Rollback must still run cleanly
+        # (destroy_vm/teardown_* are idempotent no-ops for resources that
+        # never existed) rather than assuming something to clean up.
+        vm = VMSpec(name="vm1", type=VMType.PXE, cpu=1, memory_mb=1024, interfaces=ifaces("control"))
+        mission = MissionSpec(name="M", networks={"control": 100}, vms={"vm1": vm}, placement={"vm1": "h1"})
+        hosts = {"h1": HostSpec(name="h1", cpus=64, memory_mb=262144, address="h1.cluster.local")}
+        status = self._register(mission, hosts)
+
+        with mock.patch.object(deploy_mod, "ovn_client") as m_ovn, \
+             mock.patch.object(deploy_mod.networking, "provision_networks", side_effect=RuntimeError("OVN down")), \
+             mock.patch.object(deploy_mod.networking, "teardown_mission_networking"), \
+             mock.patch.object(deploy_mod.storage_service, "teardown_mission_storage"), \
+             mock.patch.object(deploy_mod.compute, "destroy_vm") as m_destroy:
+            deploy_mod.deploy_mission(status.mission_id, mission, hosts, make_deployment_cfg())
+
+        m_destroy.assert_called_once_with("vm1", "h1.cluster.local", ssh_user="root")  # still attempted -- idempotent, harmless
+        self.assertEqual(self.store.get(status.mission_id).state, MissionState.ROLLED_BACK)
+
+    def test_rollback_failure_leaves_state_error_and_keeps_resources_reserved(self):
+        vm = VMSpec(name="render01", type=VMType.PXE, cpu=8, memory_mb=32768, interfaces=ifaces("control"), gpu_profile="X")
+        mission = MissionSpec(name="M", networks={"control": 100}, vms={"render01": vm}, placement={"render01": "h1"})
+        hosts = {"h1": HostSpec(name="h1", cpus=64, memory_mb=262144, address="h1.cluster.local", gpu_devices=[GpuDeviceSpec(profile="X", mdev_uuid="uuid-1")])}
+        status = self._register(mission, hosts)
+
+        with mock.patch.object(deploy_mod, "ovn_client"), \
+             mock.patch.object(deploy_mod.networking, "provision_networks", side_effect=RuntimeError("OVN down")), \
+             mock.patch.object(deploy_mod.networking, "teardown_mission_networking"), \
+             mock.patch.object(deploy_mod.storage_service, "teardown_mission_storage"), \
+             mock.patch.object(deploy_mod.compute, "destroy_vm", side_effect=RuntimeError("host unreachable, can't confirm VM is gone")):
+            deploy_mod.deploy_mission(status.mission_id, mission, hosts, make_deployment_cfg())
+
+        final = self.store.get(status.mission_id)
+        # Rollback itself failed -- must NOT claim RolledBack, and must NOT free reservations.
+        self.assertEqual(final.state, MissionState.ERROR)
+        self.assertEqual(self.store.active_mac_prefixes(), {"aa:bb:cc"})
+        self.assertEqual(self.store.active_gpu_allocations(), {"uuid-1"})
+        rollback_steps = [s for s in final.steps if s.step == "rollback"]
+        self.assertEqual(rollback_steps[-1].status, "error")
+
+    def test_resubmit_after_rollback_succeeds(self):
+        # End-to-end: register, fail, roll back, then successfully
+        # register the SAME mission again -- proving rollback actually
+        # unblocks a clean resubmit, not just that the state label changed.
+        vm = VMSpec(name="render01", type=VMType.PXE, cpu=8, memory_mb=32768, interfaces=ifaces("control"), gpu_profile="X")
+        mission = MissionSpec(name="M", networks={"control": 100}, vms={"render01": vm}, placement={"render01": "h1"})
+        hosts = {"h1": HostSpec(name="h1", cpus=64, memory_mb=262144, address="h1.cluster.local", gpu_devices=[GpuDeviceSpec(profile="X", mdev_uuid="uuid-1")])}
+        status1 = self._register(mission, hosts)
+
+        with mock.patch.object(deploy_mod, "ovn_client"), \
+             mock.patch.object(deploy_mod.networking, "provision_networks", side_effect=RuntimeError("OVN down")), \
+             mock.patch.object(deploy_mod.networking, "teardown_mission_networking"), \
+             mock.patch.object(deploy_mod.storage_service, "teardown_mission_storage"), \
+             mock.patch.object(deploy_mod.compute, "destroy_vm"):
+            deploy_mod.deploy_mission(status1.mission_id, mission, hosts, make_deployment_cfg())
+
+        self.assertEqual(self.store.get(status1.mission_id).state, MissionState.ROLLED_BACK)
+
+        # Now resubmit -- must succeed and get a full allocation, not be
+        # blocked by the failed attempt's now-freed reservations.
+        status2 = self._register(mission, hosts)
+        self.assertEqual(status2.gpu_allocations, {"render01": "uuid-1"})
+        self.assertNotEqual(status2.mission_id, status1.mission_id)
+
+
 class TestTeardownMission(unittest.TestCase):
     def setUp(self):
         self.store = MissionStore()
@@ -251,7 +355,7 @@ class TestTeardownMission(unittest.TestCase):
              mock.patch.object(teardown_mod.storage_service, "teardown_mission_storage") as m_storage_teardown:
             teardown_mod.teardown_mission(status.mission_id, mission, hosts, make_deployment_cfg())
 
-        m_destroy.assert_called_once_with("vm1", "h1.cluster.local")
+        m_destroy.assert_called_once_with("vm1", "h1.cluster.local", ssh_user="root")
         m_storage_teardown.assert_called_once()
         self.assertEqual(self.store.get(status.mission_id).state, MissionState.DESTROYED)
 

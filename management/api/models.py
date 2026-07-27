@@ -104,6 +104,8 @@ class MissionStatusResponse(BaseModel):
     name: str
     state: str
     mac_prefix: Optional[str] = None
+    resolved_macs: Dict[str, List[str]] = {}
+    gpu_allocations: Dict[str, str] = {}
     steps: List[StepLogEntryModel]
     error: Optional[str] = None
 

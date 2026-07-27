@@ -20,6 +20,10 @@ end-to-end.
   (MIG/vGPU) passthrough. `mission_bravo.yaml` is a 4-VM (2 linked-clone +
   2 PXE) quick-test version of the same conventions.
 
+**See `CODE_REVIEW.md`** for a full architecture/assumptions review,
+deployment readiness checklist, and air-gap-specific recommendations —
+read that before a real deployment, not just this file.
+
 ## Read this first: MAC addresses are an operator input, not generated
 
 **Per operator confirmation, the guest software running inside mission
@@ -74,14 +78,17 @@ rescue/                      Remote 1-to-many orchestration for airgapped hosts 
   README.md                     STIG'd-host prerequisites + full usage
 
 management/                  Deliverable B: mission management service
-  api/                          FastAPI app, routes, Pydantic models
-  core/                         framework-independent domain logic (see "Architecture" below)
+  api/                          FastAPI app (incl. startup reconciliation), routes, Pydantic models
+  core/                         framework-independent domain logic, incl. serialization.py (persistence)
+                                and logging_setup.py (see "Architecture" below)
   clients/                      thin wrappers: libvirt_client, ovn_client, ceph_client, nm_client
-  services/                     compute, networking, storage, missions, validation, cluster_config, cluster_health
-  workers/                      deploy.py, teardown.py (the background task workflow)
-  templates/vm.xml.j2           the libvirt domain XML template
+  services/                     compute, networking, storage, missions, validation, cluster_config,
+                                cluster_health, reconciliation
+  workers/                      deploy.py (incl. automatic rollback on failure), teardown.py
+  templates/vm.xml.j2           the libvirt domain XML template (embeds mission/VM identity metadata)
   mission_defs/                 mission_alpha.yaml, mission_bravo.yaml, template.yaml, README.md
   mission-management.service    systemd unit for running the API persistently post-bootstrap
+  data/                         SQLite mission database (created at runtime if MISSION_DB_PATH is set; not shipped)
   tests/                        full unit + pipeline test suite (see "Testing" below)
 
 tools/
@@ -228,10 +235,15 @@ sudo systemctl enable --now mission-management.service
 ```
 
 See `management/mission-management.service`'s own comments for the
-account/hardening reasoning. This is still a prototype — the design doc
+account/hardening reasoning. That unit also sets `MISSION_DB_PATH`, so
+mission state (including in-flight deployments) survives a restart of
+this service -- on startup, before accepting any requests, it also
+reconciles that recovered state against what's actually running live on
+the cluster (see "Design choices and deviations" below and
+`services/reconciliation.py`). This is still a prototype — the design doc
 explicitly scopes high-availability of the management service itself as
-future work, so this is a single systemd unit on a single host, not a
-clustered/HA deployment.
+future work, so this is a single systemd unit on a single host with a
+local SQLite file, not a clustered/HA deployment with a shared database.
 
 ## What was and wasn't executed in this build environment
 
@@ -248,7 +260,7 @@ profiles, and separated golden/runtime storage.
 - 14 unit tests for `rescue/orchestrate.py`'s command construction and
   multi-host orchestration logic (rsync/SSH commands themselves mocked —
   no real SSH target in this sandbox).
-- 159 unit/pipeline tests for `management/`, including:
+- 211 unit/pipeline tests for `management/`, including:
   - Every domain-model validation rule in `core/types.py`, including
     per-interface `mac_suffix` format/uniqueness rules.
   - `core/macs.py`'s prefix-per-deployment resolution: locally-
@@ -267,9 +279,29 @@ profiles, and separated golden/runtime storage.
     physical GPU slice actually exists between them.
   - `core/xml_render.py` rendering real libvirt domain XML for every VM
     shape (linked-clone, PXE, mdev-based GPU passthrough, both storage
-    backends) and parsing it back with `xml.etree.ElementTree` to confirm
-    exact NIC count, MAC values, disk presence/absence, GPU `<hostdev
-    type='mdev'>` presence/absence, and CPU/memory.
+    backends, and VM interface counts from 1 up to 8+ -- there is no
+    fixed NIC count anywhere in this pipeline) and parsing it back with
+    `xml.etree.ElementTree` to confirm exact NIC count, MAC values, disk
+    presence/absence, GPU `<hostdev type='mdev'>` presence/absence,
+    CPU/memory, and the embedded `<metadata>` block used by
+    `services/reconciliation.py` to trace a live VM back to its mission.
+  - `core/serialization.py`'s MissionSpec/MissionStatus <-> JSON
+    round-tripping (every field, including nested VMs/interfaces),
+    confirming the output is genuinely `json.dumps`-safe.
+  - `core/state.py`'s SQLite persistence path specifically (opt-in via
+    `MISSION_DB_PATH`; the default remains in-memory-only with zero
+    import-time side effects) -- using real temp-file databases to
+    confirm a mission's full state (including its MAC prefix and GPU
+    allocations) survives a MissionStore being discarded and a new one
+    constructed against the same file, simulating a process restart.
+  - `services/reconciliation.py`'s drift detection: a mission confirmed
+    intact, a mission missing some or all of its VMs after a restart, and
+    a mission discovered running live with no database record at all
+    (correctly reconstructed on a best-effort basis, and correctly
+    freeing its GPU/MAC reservations once later destroyed) -- with
+    `clients/libvirt_client.py` mocked out but exercised against real
+    rendered domain XML (via `core/xml_render.py`), not hand-written XML
+    fixtures.
   - `services/storage.py`'s golden-image catalog resolution (by name +
     revision) and its dispatch to the right cross-pool-clone /
     cross-cluster-copy / mount-copy path per `config/storage.yaml`'s
@@ -283,8 +315,12 @@ profiles, and separated golden/runtime storage.
     that GPU VMs exactly fill the configured MIG/vGPU slice counts.
   - `workers/deploy.py` / `workers/teardown.py`'s orchestration control
     flow (step ordering, GPU mdev allocation by profile, error
-    propagation, mission state transitions, MAC-prefix release on
-    teardown), with the services layer mocked out.
+    propagation, mission state transitions, MAC-prefix/GPU-allocation
+    release on teardown) AND `workers/deploy.py`'s automatic rollback on
+    failure -- including that a failed-then-rolled-back mission can be
+    resubmitted immediately, and that a rollback which itself fails
+    correctly holds resources reserved rather than freeing them
+    prematurely -- with the services layer mocked out.
   - That `clients/*.py` import cleanly and fail with a clear, actionable
     error (not a crash) when the real libvirt/ovsdbapp/rados libraries
     aren't present.
@@ -294,11 +330,15 @@ profiles, and separated golden/runtime storage.
 
 **Written to spec but NOT executable here (no network, no real
 infrastructure):**
-- `management/api/*.py` (FastAPI routes and Pydantic models) — fastapi/
-  pydantic aren't installable without network access. This code is a
-  thin, well-trodden CRUD+background-task wrapper around the
-  already-tested `core`/`services` logic; the risk surface it adds is
-  low, but it has not been run.
+- `management/api/*.py` (FastAPI routes and Pydantic models), including
+  `api/app.py`'s startup `lifespan` handler that calls
+  `services/reconciliation.py` — fastapi/pydantic aren't installable
+  without network access. This code is a thin, well-trodden
+  CRUD+background-task wrapper around the already-tested
+  `core`/`services` logic (`reconciliation.py`'s own scan/comparison
+  logic IS unit-tested, against real rendered domain XML, with only
+  `clients/libvirt_client.py`'s connection mocked out); the risk surface
+  this layer adds is low, but it has not been run.
 - Any real call into `clients/libvirt_client.py`, `clients/ovn_client.py`,
   or `clients/ceph_client.py` — these need a real hypervisor, a real OVN
   Northbound DB, and a real Ceph cluster respectively. `ovn_client.py`'s
@@ -427,10 +467,21 @@ scratch — re-apply any manual `mac_suffix` edits you'd made afterward.
   agree on this naming) — a plain bridge/VLAN interface, as sketched
   illustratively in the source doc, would not by itself give OVN logical-
   switch isolation between missions.
-- **Mission-scoped naming**: OVN switches/routers/ports are named
-  `<mission>-<network>` / `<mission>-router` / `<mission>-<vm>-<network>`
-  so multiple missions (or multiple concurrent deployments of the same
-  mission) can safely coexist on one OVN Northbound DB.
+- **Deployment-scoped naming**: OVN switches/routers/ports are named
+  `<mission>-<mission_id>-<network>` / `<mission>-<mission_id>-router` /
+  `<mission>-<mission_id>-<vm>-<network>` — scoped by the unique
+  `mission_id`, not just the human-readable mission name, so multiple
+  concurrent *deployments of the identical mission definition* get
+  genuinely separate OVN objects, not just distinguishable-looking names
+  that would otherwise collide (`may_exist=True` would silently reuse the
+  first deployment's switch for the second). See `CODE_REVIEW.md` §4.1
+  for the full story of why this matters and how it was caught.
+- **Management service SSH access**: the management service reaches every
+  compute host's libvirt socket over SSH as `config/hosts.yaml`'s
+  `management_ssh_user` (a dedicated, unprivileged service account with
+  `libvirt` group membership) — not root, since STIG-hardened hosts
+  commonly disable direct root SSH login. See `CODE_REVIEW.md` §4.1 and
+  §6 for the account/group requirements this implies.
 - **`DELETE /missions/{id}`** needs the original mission spec to know what
   to tear down; the in-memory store retains it from the original `POST`.
 - **Cross-deployment resource contention is checked, not just per-mission
@@ -444,19 +495,50 @@ scratch — re-apply any manual `mac_suffix` edits you'd made afterward.
   slices, correctly get a `409 Conflict` on the second one rather than
   both succeeding and colliding later (originally an opaque libvirt/mdev
   error at define-VM time, for the GPU case).
-- **Known gap**: mission state is in-memory and single-process, per the
-  design doc's own scoping of HA as future work. A restart of the
-  management service loses in-flight mission status (not the VMs
-  themselves, which keep running under libvirt) — and also frees every
-  MAC prefix and GPU device allocation that deployment had reserved, so
-  a restart followed by a new deployment could in principle reissue a
-  prefix or GPU slice still actually in use by VMs from before the
-  restart. Persisting mission state (a database instead of an in-memory
-  dict) would close this gap; scoped as future work alongside the rest
-  of the HA story.
-- **Known gap**: on a define-VM failure partway through a mission, VMs
-  defined before the failure are left running (no automatic rollback) —
-  the design doc explicitly scopes rollback as future work.
+- **Mission state persists across a management-service restart**, closing
+  what was originally a known gap here. `core/state.py`'s MissionStore
+  writes through to a SQLite database (stdlib `sqlite3` -- no new
+  dependency, fully offline) whenever `MISSION_DB_PATH` is set (see
+  `management/mission-management.service`, which sets it for a real
+  deployment; unset, behavior is unchanged from before -- in-memory
+  only). On startup, the database is reloaded BEFORE the API starts
+  accepting requests, and `services/reconciliation.py` additionally scans
+  every host's actual live libvirt domains and compares them against
+  that reloaded state -- catching drift a database alone can't (a VM
+  deleted directly via `virsh`, a management-service instance pointed at
+  an already-provisioned cluster with no prior database at all). VM ->
+  mission attribution for this scan works by reading a `<metadata>` block
+  embedded in every VM's domain XML at deploy time (see
+  `core/xml_render.py`), not by guessing from naming conventions, so a
+  live VM can always be traced back to its mission even without a
+  database record. **What reconciliation can't fully recover**: for a
+  mission whose database record is missing entirely, only what a live
+  domain's own XML exposes (VM names, actual MACs, GPU mdev UUIDs) is
+  recoverable -- the original `networks:` VLAN mapping, `image_revision`
+  pinning, and `file_version` are not written into a domain's XML and
+  aren't recoverable this way; such a mission is reconstructed with
+  `spec=None`, which is enough to know it exists and correctly free/hold
+  its MAC prefix and GPU reservations, but not enough to redeploy or
+  fully re-validate against acceptance criteria without the operator
+  re-supplying the original mission file. Full multi-node HA (a
+  clustered/replicated database, leader election for the management
+  service itself) remains future work, as the design doc scopes it.
+- **A failed deployment is automatically rolled back**, closing what was
+  originally a known gap here. On any failure, `workers/deploy.py` now
+  logs the error (via `core/logging_setup.py`, surfaced in the service's
+  own console/journal output, not just queryable through the API) and
+  tears down everything that attempt had already created -- VMs, then
+  OVN networking, then runtime storage -- using the same idempotent
+  teardown functions `DELETE /missions/{id}` uses, so it's safe to call
+  regardless of which of the four steps the original failure happened
+  at. If rollback fully succeeds, the mission moves to a distinct
+  `RolledBack` state (not conflated with an operator-requested
+  `Destroyed`) and frees its MAC prefix/GPU reservations, so the exact
+  same mission can be resubmitted immediately with no leftover
+  contention. If rollback itself hits an error, the mission is
+  deliberately left in `Error` with its reservations still held, rather
+  than freeing them while real leftover resources might still exist on
+  some host -- that case needs a human to look at it.
 
 ## Testing
 
@@ -472,7 +554,7 @@ python3 -m unittest discover -s rescue/tests -p 'test_*.py' -v
 python3 -m unittest discover -s management/tests -p 'test_*.py' -v
 ```
 
-All three suites pass in this build environment (188 tests total: 15
-bootstrap + 14 rescue + 159 management). See "What was and wasn't
+All three suites pass in this build environment (240 tests total: 15
+bootstrap + 14 rescue + 207 management). See "What was and wasn't
 executed" above for what's covered and what still needs a real cluster to
 exercise.

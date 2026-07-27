@@ -86,10 +86,18 @@ def main() -> int:
         storage.configure_storage(ctx, storage_cfg, storage_backend)
 
         if not args.skip_gpu and len(host_entry.get("gpu_devices", [])) > 0:
-            gpu.ensure_iommu_kernel_args(ctx, cluster_cfg)
+            reboot_required = gpu.ensure_iommu_kernel_args(ctx, cluster_cfg)
             gpu.load_vfio_modules(ctx, cluster_cfg)
             discovered = gpu.discover_gpus(ctx)
             log.info("bootstrap: discovered physical GPU adapters (partition into MIG/vGPU slices, then run scripts/enumerate_mdev_gpus.sh and record UUIDs in config/hosts.yaml): %s", discovered)
+            if reboot_required:
+                log.warning(
+                    "bootstrap: *** REBOOT REQUIRED *** IOMMU kernel args were just added to "
+                    "/etc/default/grub -- they will not take effect until this host reboots. "
+                    "Final validation below will likely report iommu_active as not confirmed "
+                    "until you reboot and re-run bootstrap.py (or --check-only) to confirm."
+                )
+                ctx.record("reboot_required", "ok", "IOMMU kernel args added; reboot before re-running")
         else:
             log.info("bootstrap: skipping GPU setup (skip_gpu=%s, gpu_devices=%s)", args.skip_gpu, host_entry.get("gpu_devices", []))
 

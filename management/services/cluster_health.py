@@ -18,13 +18,15 @@ from core.state import store
 from core.types import HostSpec
 
 
-def check_host(host: HostSpec) -> dict:
+def check_host(host: HostSpec, ssh_user: str = "root") -> dict:
     """
     Check one compute host: can we open a libvirt connection, and if so
     how many domains are currently defined there.
 
     Args:
         host: The host to check (uses host.address for the connection).
+        ssh_user: Non-root SSH user for the libvirt connection (see
+            config/hosts.yaml's management_ssh_user).
 
     Returns:
         {"host": str, "reachable": bool, "libvirt_ok": bool | None,
@@ -34,7 +36,7 @@ def check_host(host: HostSpec) -> dict:
         is False (couldn't even check).
     """
     try:
-        conn = libvirt_client.connect(host.address)
+        conn = libvirt_client.connect(host.address, ssh_user=ssh_user)
     except Exception as exc:  # noqa: BLE001 - report as an unreachable host, not a crash
         return {"host": host.name, "reachable": False, "libvirt_ok": None, "vm_count": None, "detail": str(exc)}
 
@@ -83,7 +85,7 @@ def check_ceph(conf_path: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def scan_cluster(hosts: dict[str, HostSpec], ovn_nb_connection: str, ceph_conf_path: str | None) -> dict:
+def scan_cluster(hosts: dict[str, HostSpec], ovn_nb_connection: str, ceph_conf_path: str | None, ssh_user: str = "root") -> dict:
     """
     Run a full infrastructure scan: every host, OVN, Ceph (if configured),
     and a rollup of currently-tracked mission deployments by state.
@@ -93,6 +95,8 @@ def scan_cluster(hosts: dict[str, HostSpec], ovn_nb_connection: str, ceph_conf_p
         ovn_nb_connection: OVN NB connection string.
         ceph_conf_path: Runtime Ceph cluster's ceph.conf path, or None to
             skip the Ceph check (e.g. an all-local_qcow2 cluster).
+        ssh_user: Non-root SSH user for each host's libvirt connection
+            (see config/hosts.yaml's management_ssh_user).
 
     Returns:
         A dict matching api/models.py's ClusterHealthResponse shape:
@@ -102,7 +106,7 @@ def scan_cluster(hosts: dict[str, HostSpec], ovn_nb_connection: str, ceph_conf_p
         `ok` is True only if every host is reachable with libvirt_ok, OVN
         is reachable, and Ceph is reachable (when checked).
     """
-    host_results = [check_host(h) for h in hosts.values()]
+    host_results = [check_host(h, ssh_user=ssh_user) for h in hosts.values()]
     ovn_ok, ovn_detail = check_ovn(ovn_nb_connection)
 
     ceph_ok: bool | None = None

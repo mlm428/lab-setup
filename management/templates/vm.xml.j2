@@ -11,10 +11,23 @@
   OVN+libvirt integration (a plain bridge/VLAN interface, as sketched
   illustratively in the source design doc, would NOT by itself give OVN
   logical-switch isolation).
+
+  <metadata>: embeds mission_id/mission_name/vm_name in a custom XML
+  namespace so a live cluster scan can always trace a running VM back to
+  its mission deployment purely from its own domain XML, independent of
+  the management service's own database -- see
+  management/services/reconciliation.py.
 #}
 <domain type='kvm'>
   <name>{{ vm_name }}</name>
   <uuid>{{ uuid }}</uuid>
+  <metadata>
+    <mission:info xmlns:mission="https://github.com/anthropics/mission-cluster/metadata">
+      <mission:id>{{ mission_id }}</mission:id>
+      <mission:name>{{ mission_name }}</mission:name>
+      <mission:vm>{{ vm_name }}</mission:vm>
+    </mission:info>
+  </metadata>
   <memory unit='MiB'>{{ memory_mb }}</memory>
   <currentMemory unit='MiB'>{{ memory_mb }}</currentMemory>
   <vcpu placement='static'>{{ cpu }}</vcpu>

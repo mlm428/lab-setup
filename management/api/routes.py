@@ -5,7 +5,7 @@ REST endpoints for the mission management service.
     GET     /missions/{id}         (none)               Get one mission deployment's status/details
     DELETE  /missions/{id}         (none)               Tear down one mission deployment (async, 202)
     GET     /missions              (none)               List every tracked mission deployment
-    GET     /hosts                 (none)               Host inventory summary (capacity + GPU profiles)
+    GET     /hosts                 (none)               Host inventory summary (capacity + currently-available GPU profile slices)
     GET     /health                (none)               Lightweight liveness check (service is up, inventory loads)
     GET     /cluster/health        (none)               Full infrastructure scan (see below)
 
@@ -61,6 +61,8 @@ def _status_to_response(status) -> MissionStatusResponse:
         name=status.name,
         state=status.state.value,
         mac_prefix=status.mac_prefix,
+        resolved_macs=status.resolved_macs,
+        gpu_allocations=status.gpu_allocations,
         steps=[StepLogEntryModel(step=s.step, status=s.status, detail=s.detail) for s in status.steps],
         error=status.error,
     )
@@ -144,10 +146,17 @@ async def delete_mission(mission_id: str, background_tasks: BackgroundTasks):
 
 @router.get("/hosts", response_model=list[HostSummary])
 async def list_hosts():
-    """List the cluster's host inventory: capacity and available GPU profile slice counts."""
+    """
+    List the cluster's host inventory: capacity and CURRENTLY-AVAILABLE
+    GPU profile slice counts (i.e. total declared capacity minus whatever
+    is already reserved by an active mission deployment right now -- not
+    just the host's total declared capacity, which would overstate what's
+    actually free if any GPU mission is already running).
+    """
     hosts = missions_service.load_host_inventory()
+    reserved_uuids = missions_service.active_gpu_uuids()
     return [
-        HostSummary(name=h.name, cpus=h.cpus, memory_mb=h.memory_mb, gpu_profiles=h.available_profiles())
+        HostSummary(name=h.name, cpus=h.cpus, memory_mb=h.memory_mb, gpu_profiles=h.available_profiles(exclude_uuids=reserved_uuids))
         for h in hosts.values()
     ]
 
@@ -171,7 +180,7 @@ async def cluster_health():
     deployment_cfg = load_deployment_config()
     ceph_conf_path = "/etc/ceph/ceph.conf" if deployment_cfg.runtime.backend == "ceph_rbd" else None
 
-    result = scan_cluster(hosts, deployment_cfg.ovn_nb_connection, ceph_conf_path)
+    result = scan_cluster(hosts, deployment_cfg.ovn_nb_connection, ceph_conf_path, ssh_user=deployment_cfg.management_ssh_user)
     return ClusterHealthResponse(
         ok=result["ok"],
         ovn_reachable=result["ovn_reachable"],

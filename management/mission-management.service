@@ -20,6 +20,11 @@ Group=mission-mgmt
 
 WorkingDirectory=/opt/mission-compute-cluster/management
 Environment=PYTHONUNBUFFERED=1
+# Persists mission state across restarts of this service -- see
+# core/state.py's module docstring. Omitting this env var (e.g. for local
+# development) falls back to in-memory-only state, matching this
+# project's original behavior.
+Environment=MISSION_DB_PATH=/opt/mission-compute-cluster/management/data/missions.db
 ExecStart=/opt/mission-compute-cluster/management/.venv/bin/uvicorn api.app:app --host 0.0.0.0 --port 8000
 
 Restart=on-failure

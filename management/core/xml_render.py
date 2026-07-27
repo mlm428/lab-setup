@@ -37,28 +37,37 @@ def deterministic_vm_uuid(mission_name: str, vm_name: str) -> str:
     return str(uuid_lib.uuid5(MISSION_UUID_NAMESPACE, f"{mission_name}:{vm_name}"))
 
 
-def switch_name(mission_name: str, network_name: str) -> str:
+def switch_name(mission_name: str, mission_id: str, network_name: str) -> str:
     """
-    Mission-scoped OVN logical switch name. Per the design doc: "Identical
-    VLAN IDs across different missions do not conflict, thanks to
-    independent logical switch instances" -- this is what makes that true:
-    two missions both defining a "control" network get two distinct
-    switches, e.g. "Mission-Alpha-control" and "Mission-Bravo-control".
+    Deployment-scoped OVN logical switch name. Per the design doc:
+    "Identical VLAN IDs across different missions do not conflict, thanks
+    to independent logical switch instances" -- and, per operator
+    requirement, the SAME mission definition deployed twice concurrently
+    must be "totally network isolated ... in its own segmented network",
+    not just distinguishable by name. Scoping by `mission_id` (unique per
+    deployment) rather than `mission_name` alone (which repeats across
+    deployments of the same mission) is what makes that true: two
+    deployments of the identical "Mission-Alpha" mission get two distinct
+    switches for its "control" network, not one shared switch that
+    `may_exist=True` would silently make the second deployment reuse.
+    `mission_name` is included purely for human readability in
+    `ovn-nbctl show` output; `mission_id` is what actually guarantees
+    uniqueness.
     """
-    return f"{mission_name}-{network_name}"
+    return f"{mission_name}-{mission_id}-{network_name}"
 
 
-def router_name(mission_name: str) -> str:
-    """Mission-scoped OVN logical router name."""
-    return f"{mission_name}-router"
+def router_name(mission_name: str, mission_id: str) -> str:
+    """Deployment-scoped OVN logical router name -- see switch_name's docstring for why mission_id (not just mission_name) is included."""
+    return f"{mission_name}-{mission_id}-router"
 
 
-def router_port_name(mission_name: str, network_name: str) -> str:
-    """Mission-scoped name for the router-side port connecting to one of the mission's networks."""
-    return f"{mission_name}-{network_name}-rp"
+def router_port_name(mission_name: str, mission_id: str, network_name: str) -> str:
+    """Deployment-scoped name for the router-side port connecting to one of the mission's networks."""
+    return f"{mission_name}-{mission_id}-{network_name}-rp"
 
 
-def port_name(mission_name: str, vm_name: str, network_name: str) -> str:
+def port_name(mission_name: str, mission_id: str, vm_name: str, network_name: str) -> str:
     """
     OVN logical switch port name for this VM's interface on this network.
     Must match exactly what management/services/networking.py passes to
@@ -66,12 +75,13 @@ def port_name(mission_name: str, vm_name: str, network_name: str) -> str:
     references this same string to bind the OVS port to the OVN logical
     port.
 
-    Scoped by mission name: OVN's Logical_Switch_Port table is global (not
-    per-switch), so two different missions that happen to both define a VM
-    named e.g. "db01" on a network named "control" must not produce the
-    same port name.
+    Scoped by mission_id (not just mission_name): OVN's
+    Logical_Switch_Port table is global (not per-switch), so two
+    different missions -- or two concurrent deployments of the same
+    mission -- that happen to both define a VM named e.g. "db01" on a
+    network named "control" must not produce the same port name.
     """
-    return f"{mission_name}-{vm_name}-{network_name}"
+    return f"{mission_name}-{mission_id}-{vm_name}-{network_name}"
 
 
 @dataclass
@@ -113,6 +123,7 @@ def _env() -> Environment:
 
 def render_domain_xml(
     mission_name: str,
+    mission_id: str,
     vm_name: str,
     vm: VMSpec,
     macs: list[str],
@@ -125,6 +136,12 @@ def render_domain_xml(
 
     Args:
         mission_name: Owning mission's name (used for OVN naming + UUID derivation).
+        mission_id: This specific deployment's id -- embedded in the
+            rendered <metadata> block alongside mission_name and vm_name,
+            so a live cluster scan can trace a running VM back to its
+            mission deployment purely from its own domain XML (see
+            services/reconciliation.py), independent of whether this
+            service's own database still has a record of it.
         vm_name: This VM's name within the mission.
         vm: The VM's spec (type, cpu, memory, interfaces, gpu_profile, etc.).
         macs: Fully-resolved MAC addresses, one per interface, in the same
@@ -160,7 +177,7 @@ def render_domain_xml(
         {
             "network": net_name,
             "mac": mac,
-            "port_name": port_name(mission_name, vm_name, net_name),
+            "port_name": port_name(mission_name, mission_id, vm_name, net_name),
         }
         for net_name, mac in zip(interface_names, macs)
     ]
@@ -170,6 +187,8 @@ def render_domain_xml(
     template = _env().get_template("vm.xml.j2")
     raw_xml = template.render(
         vm_name=vm_name,
+        mission_id=mission_id,
+        mission_name=mission_name,
         uuid=deterministic_vm_uuid(mission_name, vm_name),
         memory_mb=vm.memory_mb,
         cpu=vm.cpu,

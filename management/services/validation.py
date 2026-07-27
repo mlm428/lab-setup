@@ -56,6 +56,7 @@ def validate_mission_deployment(
     host_addresses_by_vm: dict[str, str],
     assigned_macs: dict[str, list[str]],
     gpu_mdev_by_vm: dict[str, str],
+    ssh_user: str = "root",
 ) -> MissionValidationReport:
     """
     Re-inspect every VM's actual libvirt domain XML on its placed host and
@@ -66,6 +67,8 @@ def validate_mission_deployment(
         host_addresses_by_vm: {vm_name: host_address} actually used at deploy time.
         assigned_macs: {vm_name: [mac, ...]} actually used at deploy time.
         gpu_mdev_by_vm: {vm_name: mdev_uuid} for every VM that has a GPU.
+        ssh_user: Non-root SSH user for the libvirt connection (see
+            config/hosts.yaml's management_ssh_user).
 
     Returns:
         A MissionValidationReport listing every mismatch found (empty
@@ -83,7 +86,7 @@ def validate_mission_deployment(
             report.issues.append(ValidationIssue(vm_name, "placement", "no host recorded for this VM"))
             continue
 
-        conn = libvirt_client.connect(host)
+        conn = libvirt_client.connect(host, ssh_user=ssh_user)
         try:
             names = libvirt_client.list_domain_names(conn)
             if vm_name not in names:
@@ -151,12 +154,15 @@ def _validate_single_vm_xml(
         report.issues.append(ValidationIssue(vm_name, "memory", f"expected {vm.memory_mb} MiB, found {mem_el.text}"))
 
 
-def validate_networks(api, mission: MissionSpec) -> list[str]:
+def validate_networks(api, mission_id: str, mission: MissionSpec) -> list[str]:
     """
     Check that every mission network's OVN logical switch actually exists.
 
     Args:
         api: A connected ovsdbapp OVN Northbound API object.
+        mission_id: This deployment's unique id (see
+            services/networking.py:provision_networks's docstring for why
+            switch names are scoped by this, not just mission.name).
         mission: The mission (deployment) being validated.
 
     Returns:
@@ -166,7 +172,7 @@ def validate_networks(api, mission: MissionSpec) -> list[str]:
     existing = set(ovn_client.list_logical_switches(api))
     missing = []
     for net_name in mission.networks:
-        expected = switch_name(mission.name, net_name)
+        expected = switch_name(mission.name, mission_id, net_name)
         if expected not in existing:
             missing.append(net_name)
     return missing

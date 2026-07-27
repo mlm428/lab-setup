@@ -190,3 +190,8 @@ def get_mission(mission_id: str) -> MissionStatus | None:
 def list_missions() -> list[MissionStatus]:
     """Return every tracked mission deployment (any state)."""
     return store.list()
+
+
+def active_gpu_uuids() -> set[str]:
+    """Every GPU mdev UUID currently reserved by an active mission deployment (see core.state.MissionStore.active_gpu_allocations)."""
+    return store.active_gpu_allocations()

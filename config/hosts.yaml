@@ -20,7 +20,22 @@
 # MIG slices on compute01 and 4 vGPU slices on compute03 below -- enough
 # for the proof-of-concept's 7 GPU VMs. Confirm actual profile names/
 # counts/UUIDs against your real hardware before a real deployment.
+#
+# MANAGEMENT_SSH_USER NOTE: the management service (management/clients/
+# libvirt_client.py) reaches every compute host over
+# qemu+ssh://<management_ssh_user>@<host>/system. This is deliberately
+# NOT "root" -- STIG-hardened hosts commonly set PermitRootLogin no (see
+# rescue/README.md's STIG'd-host prerequisites). Use a dedicated,
+# unprivileged service account instead, added to the `libvirt` group on
+# every compute host (libvirtd's default polkit rules grant that group
+# full local access to the libvirt socket) with an SSH key the management
+# service's own host trusts. This account is DIFFERENT from whatever
+# account rescue/orchestrate.py uses for bootstrap (--ssh-user there) --
+# that one only needs sudo for the one-time bootstrap run; this one needs
+# no sudo at all, just libvirt group membership, for its ongoing runtime role.
 # =============================================================================
+management_ssh_user: mission-mgmt
+
 hosts:
   compute01:
     address: compute01.cluster.local

@@ -18,9 +18,42 @@ offline/airgapped review without a running server.
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 
 from api.routes import API_VERSION, router
+from core.logging_setup import log
+from core.state import store
+from services.cluster_config import load_deployment_config
+from services.missions import load_host_inventory
+from services.reconciliation import reconcile_on_startup
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Runs once, before this service starts accepting any requests: scans
+    every host's actual live libvirt domains and reconciles them against
+    the mission database (already reloaded from persistent storage at
+    import time, if MISSION_DB_PATH is set -- see core/state.py's module
+    docstring), so restart-induced drift (a mission the database has no
+    record of, or one missing VMs it should have) is surfaced immediately
+    rather than silently. See services/reconciliation.py for exactly what
+    this can and can't recover. Never prevents startup -- a reconciliation
+    failure (e.g. a host unreachable) is logged and the service starts
+    anyway, since serving new requests is more valuable than blocking on
+    a best-effort consistency check.
+    """
+    try:
+        hosts = load_host_inventory()
+        deployment_cfg = load_deployment_config()
+        report = reconcile_on_startup(hosts, store, ssh_user=deployment_cfg.management_ssh_user)
+        log.info("startup: reconciliation complete: %s", report.as_dict())
+    except Exception as exc:  # noqa: BLE001 - startup must proceed regardless
+        log.error("startup: reconciliation failed, starting anyway: %s", exc, exc_info=True)
+    yield
+
 
 app = FastAPI(
     title="Mission Compute Cluster Management API",
@@ -30,6 +63,7 @@ app = FastAPI(
         "Ceph cluster."
     ),
     version=API_VERSION,
+    lifespan=lifespan,
 )
 
 app.include_router(router)

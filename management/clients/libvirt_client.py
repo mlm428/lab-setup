@@ -33,15 +33,27 @@ def _require_libvirt():
         raise LibvirtUnavailableError()
 
 
-def connect(host: Optional[str] = None):
+def connect(host: Optional[str] = None, ssh_user: str = "root"):
     """
     Open a libvirt connection. `host` is a compute node name/address for a
-    remote connection (qemu+ssh://root@<host>/system); None connects to
-    the local hypervisor (qemu:///system) -- useful when the management
+    remote connection (qemu+ssh://<ssh_user>@<host>/system); None connects
+    to the local hypervisor (qemu:///system) -- useful when the management
     service itself runs on a compute node.
+
+    Args:
+        host: Compute host address, or None for a local connection.
+        ssh_user: Remote SSH user for the qemu+ssh:// URI. Defaults to
+            "root" only for a bare/manual call -- real callers should
+            always pass config/hosts.yaml's `management_ssh_user`
+            explicitly (see services/cluster_config.py) rather than rely
+            on this default, since STIG-hardened hosts commonly disable
+            direct root SSH login. A non-root user works fine here as
+            long as it's a member of the `libvirt` group on the target
+            host (libvirtd's default polkit rules grant that group full
+            local access to the libvirt socket) -- no sudo needed.
     """
     _require_libvirt()
-    uri = f"qemu+ssh://root@{host}/system" if host else "qemu:///system"
+    uri = f"qemu+ssh://{ssh_user}@{host}/system" if host else "qemu:///system"
     conn = libvirt.open(uri)
     if conn is None:
         raise RuntimeError(f"libvirt.open() failed for URI {uri}")

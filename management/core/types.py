@@ -242,10 +242,26 @@ class HostSpec:
     address: str = ""
     gpu_devices: list[GpuDeviceSpec] = field(default_factory=list)
 
-    def available_profiles(self) -> dict[str, int]:
-        """Count of free slices per GPU profile name on this host."""
+    def available_profiles(self, exclude_uuids: "set[str] | None" = None) -> dict[str, int]:
+        """
+        Count of GPU slices per profile name on this host.
+
+        Args:
+            exclude_uuids: mdev UUIDs to treat as unavailable (already
+                reserved by a currently-active mission deployment -- see
+                core/state.py:MissionStore.active_gpu_allocations()).
+                Omit (the default) to count total declared capacity
+                regardless of current reservations.
+
+        Returns:
+            {profile_name: count}, counting only devices whose mdev_uuid
+            is not in `exclude_uuids`.
+        """
+        exclude_uuids = exclude_uuids or set()
         counts: dict[str, int] = {}
         for dev in self.gpu_devices:
+            if dev.mdev_uuid in exclude_uuids:
+                continue
             counts[dev.profile] = counts.get(dev.profile, 0) + 1
         return counts
 
@@ -259,8 +275,19 @@ class MissionState(str, Enum):
     VALIDATING = "Validating"
     RUNNING = "Running"
     ERROR = "Error"
+    ROLLING_BACK = "RollingBack"
+    ROLLED_BACK = "RolledBack"
     DESTROYING = "Destroying"
     DESTROYED = "Destroyed"
+
+
+# States that no longer hold any cluster resources (MAC prefix, GPU
+# device allocations) -- excluded from core/state.py's
+# active_mac_prefixes()/active_gpu_allocations(), so a mission that ended
+# up here (whether via a clean operator-requested teardown, or an
+# automatic rollback after a failed deploy) frees its reservations for a
+# future deployment to reuse.
+TERMINAL_FREEING_STATES = {MissionState.DESTROYED, MissionState.ROLLED_BACK}
 
 
 @dataclass

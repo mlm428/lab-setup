@@ -11,9 +11,18 @@ ports with static MAC addresses. Mirrors the design doc's:
     ovn-nbctl lsp-set-addresses vm1-eth0 "52:54:00:AA:BB:01"
 
 ...via ovsdbapp instead of shelling out to ovn-nbctl, and with every name
-mission-scoped (see core/xml_render.py's switch_name/router_name/
-port_name) so multiple missions -- or multiple concurrent *deployments* of
-the same mission -- can safely coexist on the same OVN Northbound DB.
+scoped by `mission_id` (see core/xml_render.py's switch_name/router_name/
+port_name) -- NOT just `mission.name` -- so multiple missions, AND
+multiple concurrent *deployments of the same mission definition*, each
+get their own genuinely separate OVN logical switches/router/ports.
+Scoping by name alone would make a second deployment of an
+identically-named mission silently reuse the first deployment's existing
+switches (`may_exist=True` no-ops), leaving both on the same broadcast
+domain -- which would directly violate the "totally network isolated ...
+in its own segmented network" requirement per-deployment MAC-prefix
+randomization was introduced for. `mission_id` is what actually delivers
+that isolation; the MAC prefix work is an additional, independent layer
+on top of it.
 """
 from __future__ import annotations
 
@@ -37,63 +46,73 @@ def _router_gateway_cidr(vlan_id: int) -> str:
     return f"10.{third_octet}.0.1/24"
 
 
-def _router_port_mac(mission_name: str, network_name: str) -> str:
+def _router_port_mac(mission_id: str, network_name: str) -> str:
     """
-    Deterministic MAC for a mission's router port on one network. Uses a
-    separate hash (not core/macs.py's per-deployment prefix scheme, which
-    is reserved for actual VM NICs) with a fixed 0xff marker octet so
-    router ports are trivially distinguishable from VM NICs when reading a
-    packet capture; a mission has at most a handful of these, so a 2-byte
-    hash space is more than enough to avoid collisions between them.
+    Deterministic MAC for a mission deployment's router port on one
+    network. Uses a separate hash (not core/macs.py's per-deployment
+    prefix scheme, which is reserved for actual VM NICs), keyed by
+    mission_id (not mission_name) so two concurrent deployments of the
+    same mission get distinct router port MACs too -- with a fixed 0xff
+    marker octet so router ports are trivially distinguishable from VM
+    NICs when reading a packet capture; a mission has at most a handful
+    of these, so a 2-byte hash space is more than enough to avoid
+    collisions between them.
     """
-    digest = hashlib.sha256(f"{mission_name}:router:{network_name}".encode("utf-8")).digest()
+    digest = hashlib.sha256(f"{mission_id}:router:{network_name}".encode("utf-8")).digest()
     return f"52:54:00:ff:{digest[0]:02x}:{digest[1]:02x}"
 
 
-def provision_networks(api, mission: MissionSpec) -> dict[str, str]:
+def provision_networks(api, mission_id: str, mission: MissionSpec) -> dict[str, str]:
     """
     Create one OVN logical switch per mission network, a logical router,
-    and connect every switch to the router.
+    and connect every switch to the router -- all scoped to this specific
+    deployment via `mission_id`.
 
     Args:
         api: A connected ovsdbapp OVN Northbound API object (see
             clients/ovn_client.py:connect).
+        mission_id: This deployment's unique id (see
+            core/state.py:MissionStore.register_deployment) -- what
+            actually guarantees this deployment's OVN objects are
+            distinct from any other deployment's, including another
+            deployment of the identical mission definition.
         mission: The mission whose `networks` to provision.
 
     Returns:
         {network_name: ovn_switch_name} for callers (e.g. add_vm_ports)
         that need the OVN-side switch name.
     """
-    router = router_name(mission.name)
+    router = router_name(mission.name, mission_id)
     ovn_client.ensure_logical_router(api, router)
 
     switches: dict[str, str] = {}
     for net_name, vlan_id in mission.networks.items():
-        switch = switch_name(mission.name, net_name)
+        switch = switch_name(mission.name, mission_id, net_name)
         ovn_client.ensure_logical_switch(api, switch)
         switches[net_name] = switch
 
-        rp_name = router_port_name(mission.name, net_name)
+        rp_name = router_port_name(mission.name, mission_id, net_name)
         ovn_client.ensure_router_port(
             api,
             router=router,
             port_name=rp_name,
             switch=switch,
             switch_port_name=f"{rp_name}-sw",
-            mac=_router_port_mac(mission.name, net_name),
+            mac=_router_port_mac(mission_id, net_name),
             cidr=_router_gateway_cidr(vlan_id),
         )
 
     return switches
 
 
-def add_vm_ports(api, mission: MissionSpec, resolved_macs: dict[str, list[str]]) -> None:
+def add_vm_ports(api, mission_id: str, mission: MissionSpec, resolved_macs: dict[str, list[str]]) -> None:
     """
     Create one OVN logical port per VM interface and pin its already-
     resolved MAC address.
 
     Args:
         api: A connected ovsdbapp OVN Northbound API object.
+        mission_id: This deployment's unique id (see provision_networks's docstring).
         mission: The mission whose VMs to create ports for.
         resolved_macs: {vm_name: [mac, ...]} in the same order as each
             VM's interface_names() -- computed once at mission
@@ -109,18 +128,19 @@ def add_vm_ports(api, mission: MissionSpec, resolved_macs: dict[str, list[str]])
     for vm_name, vm in mission.vms.items():
         macs = resolved_macs[vm_name]
         for (net_name, _iface), mac in zip(vm.interfaces.items(), macs):
-            switch = switch_name(mission.name, net_name)
-            port = port_name(mission.name, vm_name, net_name)
+            switch = switch_name(mission.name, mission_id, net_name)
+            port = port_name(mission.name, mission_id, vm_name, net_name)
             ovn_client.add_vm_port(api, switch, port, mac)
 
 
-def teardown_mission_networking(api, mission: MissionSpec) -> None:
+def teardown_mission_networking(api, mission_id: str, mission: MissionSpec) -> None:
     """
     Idempotently remove every VM port, every switch, and the mission's
     router for one deployment. Order matters -- ports before switches.
 
     Args:
         api: A connected ovsdbapp OVN Northbound API object.
+        mission_id: This deployment's unique id (see provision_networks's docstring).
         mission: The mission (deployment) to tear down networking for.
 
     Returns:
@@ -128,10 +148,10 @@ def teardown_mission_networking(api, mission: MissionSpec) -> None:
     """
     for vm_name, vm in mission.vms.items():
         for net_name in vm.interface_names():
-            port = port_name(mission.name, vm_name, net_name)
+            port = port_name(mission.name, mission_id, vm_name, net_name)
             ovn_client.remove_vm_port(api, port)
 
     for net_name in mission.networks:
-        ovn_client.remove_logical_switch(api, switch_name(mission.name, net_name))
+        ovn_client.remove_logical_switch(api, switch_name(mission.name, mission_id, net_name))
 
-    ovn_client.remove_logical_router(api, router_name(mission.name))
+    ovn_client.remove_logical_router(api, router_name(mission.name, mission_id))
