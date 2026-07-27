@@ -1,0 +1,36 @@
+%%{init: {'theme': 'neutral'}}%%
+graph TB
+    operator["Operator"]
+
+    subgraph rescue_zone["Rescue zone (transient, airgapped from internet)"]
+        rescue["Rescue / setup node<br/>rescue/orchestrate.py"]
+    end
+
+    subgraph cluster_zone["Compute cluster (management network)"]
+        mgmt["Management service<br/>(Deliverable B, one host)"]
+        subgraph hosts["Compute hosts (bootstrapped, Deliverable A)"]
+            h1["compute01<br/>libvirt + OVS/OVN + Ceph client"]
+            h2["compute02..N<br/>libvirt + OVS/OVN + Ceph client"]
+        end
+        ovn["OVN Northbound/Southbound DB"]
+        ceph["Ceph cluster<br/>(runtime pool)"]
+    end
+
+    golden["Golden image source<br/>(same cluster / remote cluster / mount)"]
+
+    operator -->|"SSH: rescue/orchestrate.py --all"| rescue
+    rescue -->|"rsync + SSH bootstrap.py"| hosts
+    operator -->|"POST/GET/DELETE /missions"| mgmt
+    mgmt -->|"qemu+ssh (management_ssh_user)"| hosts
+    mgmt -->|"OVN Northbound API"| ovn
+    ovn -.->|"Southbound, per host"| hosts
+    mgmt -->|"librados/rbd"| ceph
+    mgmt -->|"read golden images"| golden
+    hosts -->|"runtime VM disks"| ceph
+
+    classDef actor fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef svc fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef infra fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A
+    class operator actor
+    class rescue,mgmt svc
+    class h1,h2,ovn,ceph,golden infra

@@ -1,0 +1,48 @@
+%%{init: {'theme': 'neutral'}}%%
+graph TB
+    subgraph external["Outside the cluster (airgapped from wider internet)"]
+        connected_machine["Internet-connected machine<br/>fetch_offline_packages.sh"]
+    end
+
+    subgraph rescue_node["Rescue / setup node (transient role)"]
+        orchestrate["rescue/orchestrate.py"]
+        repo_local["local dnf repo<br/>setup_local_repo.sh --serve"]
+    end
+
+    subgraph mgmt_host["Management host (one of the compute hosts, or dedicated)"]
+        mgmt_svc["mission-management.service<br/>(systemd, MISSION_DB_PATH set)"]
+        sqlite["missions.db (SQLite)"]
+    end
+
+    subgraph compute_hosts["Compute hosts"]
+        c1["compute01<br/>role: libvirt, ovn-controller, ceph-osd<br/>GPU: 4x H100-MIG-3g.40gb"]
+        c2["compute02<br/>role: libvirt, ceph-osd"]
+        c3["compute03<br/>role: libvirt, ovn-controller, ceph-osd<br/>GPU: 4x L4-vGPU-4Q"]
+        c4["compute04<br/>role: libvirt, ceph-osd"]
+    end
+
+    subgraph shared_infra["Shared cluster infrastructure"]
+        ovn_central["OVN Northbound/Southbound<br/>(hosted on compute01)"]
+        ceph_mons["Ceph monitors x3"]
+    end
+
+    connected_machine -.->|"one-way transfer"| repo_local
+    orchestrate -->|"rsync + SSH"| c1 & c2 & c3 & c4
+    repo_local -->|"HTTP dnf repo"| c1 & c2 & c3 & c4
+    mgmt_svc --> sqlite
+    mgmt_svc -->|"qemu+ssh, mission-mgmt user"| c1 & c2 & c3 & c4
+    mgmt_svc --> ovn_central
+    mgmt_svc --> ceph_mons
+    c1 & c2 & c3 & c4 --> ceph_mons
+    c1 & c3 --> ovn_central
+
+    classDef ext fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A
+    classDef rescue fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef mgmt fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef compute fill:#FAECE7,stroke:#993C1D,color:#4A1B0C
+    classDef shared fill:#FAEEDA,stroke:#854F0B,color:#412402
+    class connected_machine ext
+    class orchestrate,repo_local rescue
+    class mgmt_svc,sqlite mgmt
+    class c1,c2,c3,c4 compute
+    class ovn_central,ceph_mons shared

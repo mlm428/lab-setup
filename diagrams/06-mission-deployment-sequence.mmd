@@ -1,0 +1,40 @@
+%%{init: {'theme': 'neutral'}}%%
+sequenceDiagram
+    participant Op as Operator
+    participant API as api/routes.py
+    participant Missions as services/missions.py
+    participant Store as core/state.py<br/>(MissionStore, locked)
+    participant Macs as core/macs.py
+    participant Placement as core/placement.py
+    participant Deploy as workers/deploy.py
+    participant Net as services/networking.py
+    participant Storage as services/storage.py
+    participant Compute as services/compute.py
+    participant Clients as clients/* (libvirt, OVN, Ceph)
+
+    Op->>API: POST /missions (mission YAML)
+    API->>Missions: register_mission(mission, hosts)
+    Missions->>Placement: validate_placement()
+    Placement-->>Missions: ok / violations
+    Missions->>Store: register_deployment(mac_resolver, gpu_resolver)
+    activate Store
+    Store->>Macs: resolve_mission_macs(active_prefixes)
+    Macs-->>Store: prefix, resolved_macs
+    Store->>Placement: reserve_gpu_devices(active_uuids)
+    Placement-->>Store: gpu_allocations
+    Store-->>Missions: MissionStatus (mac_prefix, resolved_macs, gpu_allocations)
+    deactivate Store
+    Missions-->>API: MissionStatus
+    API-->>Op: 202 {mission_id, mac_prefix}
+    API->>Deploy: background: deploy_mission(mission_id, ...)
+
+    Deploy->>Net: provision_networks(mission_id, mission)
+    Net->>Clients: OVN: ls_add, lr_add, lrp_add (per mission_id)
+    Deploy->>Storage: provision_mission_storage(mission, runtime, golden)
+    Storage->>Clients: Ceph: clone/copy per golden.source
+    loop each VM
+        Deploy->>Compute: define_and_start_vm(mission_id, vm, macs, gpu_mdev)
+        Compute->>Clients: libvirt: defineXML + create
+    end
+    Deploy->>Deploy: validate_mission_deployment()
+    Deploy->>Store: update_state(Running)

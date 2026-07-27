@@ -1,0 +1,58 @@
+%%{init: {'theme': 'neutral'}}%%
+graph TB
+    subgraph api_layer["api/ -- FastAPI (written to spec, not run in this sandbox)"]
+        routes["routes.py"]
+        models["models.py<br/>Pydantic schemas"]
+        app["app.py<br/>lifespan: startup reconciliation"]
+    end
+
+    subgraph workers_layer["workers/ -- background task orchestration"]
+        deploy_w["deploy.py<br/>+ automatic rollback"]
+        teardown_w["teardown.py"]
+    end
+
+    subgraph services_layer["services/ -- glue between core/ and clients/"]
+        missions_s["missions.py"]
+        networking_s["networking.py"]
+        storage_s["storage.py"]
+        compute_s["compute.py"]
+        validation_s["validation.py"]
+        cluster_health_s["cluster_health.py"]
+        reconciliation_s["reconciliation.py"]
+        cluster_config_s["cluster_config.py"]
+    end
+
+    subgraph core_layer["core/ -- pure domain logic, ZERO infra dependencies"]
+        types_c["types.py<br/>dataclasses"]
+        macs_c["macs.py<br/>MAC prefix/suffix resolution"]
+        placement_c["placement.py<br/>capacity + GPU reservation"]
+        xml_render_c["xml_render.py<br/>libvirt XML + metadata"]
+        state_c["state.py<br/>MissionStore + SQLite"]
+        serialization_c["serialization.py"]
+        config_loader_c["config_loader.py"]
+    end
+
+    subgraph clients_layer["clients/ -- guarded thin wrappers around real infra libs"]
+        libvirt_cl["libvirt_client.py"]
+        ovn_cl["ovn_client.py"]
+        ceph_cl["ceph_client.py"]
+        nm_cl["nm_client.py"]
+    end
+
+    api_layer --> workers_layer
+    api_layer --> services_layer
+    workers_layer --> services_layer
+    services_layer --> core_layer
+    services_layer --> clients_layer
+    clients_layer -.->|"real libvirt / ovsdbapp / rados"| infra(["real infrastructure"])
+
+    classDef api fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef work fill:#FBEAF0,stroke:#993556,color:#4B1528
+    classDef svc fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef core fill:#EAF3DE,stroke:#3B6D11,color:#173404
+    classDef client fill:#FAEEDA,stroke:#854F0B,color:#412402
+    class routes,models,app api
+    class deploy_w,teardown_w work
+    class missions_s,networking_s,storage_s,compute_s,validation_s,cluster_health_s,reconciliation_s,cluster_config_s svc
+    class types_c,macs_c,placement_c,xml_render_c,state_c,serialization_c,config_loader_c core
+    class libvirt_cl,ovn_cl,ceph_cl,nm_cl client

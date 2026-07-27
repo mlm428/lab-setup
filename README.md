@@ -24,6 +24,12 @@ end-to-end.
 deployment readiness checklist, and air-gap-specific recommendations —
 read that before a real deployment, not just this file.
 
+**See `diagrams/00-README.md`** for a full set of architecture diagrams
+(Mermaid format) — high-level lifecycle diagrams for each deliverable and
+combined, plus low-level component, sequence, networking, storage, GPU,
+state-machine, topology, and data-model diagrams, with a suggested
+reading order for a guided deep dive.
+
 ## Read this first: MAC addresses are an operator input, not generated
 
 **Per operator confirmation, the guest software running inside mission

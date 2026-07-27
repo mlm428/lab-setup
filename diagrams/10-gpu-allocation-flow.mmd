@@ -1,0 +1,19 @@
+%%{init: {'theme': 'neutral'}}%%
+sequenceDiagram
+    participant VM as VM spec<br/>gpu_profile: H100-MIG-3g.40gb
+    participant Reserve as core/placement.py<br/>reserve_gpu_devices()
+    participant Hosts as config/hosts.yaml<br/>host.gpu_devices[]
+    participant Store as MissionStore<br/>active_gpu_allocations()
+
+    VM->>Reserve: request profile on placed host
+    Reserve->>Store: get UUIDs reserved by OTHER active deployments
+    Store-->>Reserve: {already_reserved_uuids}
+    Reserve->>Hosts: find device where profile matches<br/>AND uuid not in already_reserved
+    alt free device found
+        Hosts-->>Reserve: mdev_uuid
+        Reserve-->>VM: reserved (atomic, under one lock)
+        Note over VM,Store: recorded in this deployment's<br/>MissionStatus.gpu_allocations
+    else no free device
+        Reserve-->>VM: RuntimeError
+        Note over VM,Store: surfaces as 409 Conflict,<br/>not a silent double-allocation
+    end

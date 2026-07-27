@@ -1,0 +1,23 @@
+%%{init: {'theme': 'neutral'}}%%
+stateDiagram-v2
+    [*] --> Pending: register_deployment()<br/>(MAC + GPU reserved atomically)
+    Pending --> DeployingNetworks
+    DeployingNetworks --> CloningStorage
+    CloningStorage --> DefiningVMs
+    DefiningVMs --> Validating
+    Validating --> Running: acceptance criteria pass
+
+    DeployingNetworks --> Error: any step fails
+    CloningStorage --> Error: any step fails
+    DefiningVMs --> Error: any step fails
+    Validating --> Error: acceptance criteria fail
+
+    Error --> RollingBack: automatic
+    RollingBack --> RolledBack: cleanup succeeded<br/>(frees MAC prefix + GPU)
+    RollingBack --> Error: cleanup itself failed<br/>(resources stay reserved)
+
+    Running --> Destroying: DELETE /missions/id
+    Destroying --> Destroyed: frees MAC prefix + GPU
+
+    RolledBack --> [*]
+    Destroyed --> [*]

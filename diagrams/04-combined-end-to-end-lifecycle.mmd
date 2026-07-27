@@ -1,0 +1,35 @@
+%%{init: {'theme': 'neutral'}}%%
+graph LR
+    subgraph phase0["Phase 0 -- prerequisites (out of scope)"]
+        p0["Bare metal or hypervisor host<br/>STIG-hardened RHEL 9 image installed<br/>DNS, NTP, network reachability"]
+    end
+
+    subgraph phase1["Phase 1 -- Deliverable A (once per host)"]
+        p1a["rescue/orchestrate.py<br/>from external rescue node"]
+        p1b["bootstrap.py<br/>on each target host"]
+        p1c["Host ready:<br/>libvirt, OVS/OVN, Ceph client,<br/>GPU IOMMU/VFIO, Cockpit"]
+    end
+
+    subgraph phase2["Phase 2 -- install Deliverable B (once, on the chosen host)"]
+        p2a["pip install -r requirements.txt"]
+        p2b["systemd: mission-management.service<br/>MISSION_DB_PATH set"]
+        p2c["Service starts:<br/>reload DB, reconcile vs live cluster"]
+    end
+
+    subgraph phase3["Phase 3 -- ongoing mission operations (repeats)"]
+        p3a["POST /missions<br/>deploy"]
+        p3b["Running mission<br/>GET /missions/id, GET /cluster/health"]
+        p3c["DELETE /missions/id<br/>teardown"]
+    end
+
+    p0 --> p1a --> p1b --> p1c --> p2a --> p2b --> p2c --> p3a --> p3b --> p3c
+    p3c -.->|"repeat for next mission"| p3a
+
+    classDef prereq fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A
+    classDef a fill:#FAECE7,stroke:#993C1D,color:#4A1B0C
+    classDef install fill:#FBEAF0,stroke:#993556,color:#4B1528
+    classDef b fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    class p0 prereq
+    class p1a,p1b,p1c a
+    class p2a,p2b,p2c install
+    class p3a,p3b,p3c b

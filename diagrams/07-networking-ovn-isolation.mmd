@@ -1,0 +1,31 @@
+%%{init: {'theme': 'neutral'}}%%
+graph TB
+    mission_file["Mission-Alpha.yaml<br/>(one mission definition)"]
+
+    subgraph dep1["Deployment 1 -- mission_id: 2c48be8b..."]
+        sw1["OVN switch:<br/>Mission-Alpha-2c48be8b-control"]
+        r1["OVN router:<br/>Mission-Alpha-2c48be8b-router"]
+        vm1a["db01<br/>MAC a6:37:c0:10:00:00"]
+    end
+
+    subgraph dep2["Deployment 2 -- mission_id: c6624b12..."]
+        sw2["OVN switch:<br/>Mission-Alpha-c6624b12-control"]
+        r2["OVN router:<br/>Mission-Alpha-c6624b12-router"]
+        vm1b["db01<br/>MAC 72:ea:7d:10:00:00"]
+    end
+
+    mission_file -->|"deploy #1"| dep1
+    mission_file -->|"deploy #2 (same file, concurrent)"| dep2
+    vm1a --- sw1 --- r1
+    vm1b --- sw2 --- r2
+
+    note["Genuinely separate broadcast domains:<br/>OVN objects scoped by mission_id, not mission name.<br/>MAC suffix (10:00:00) identical & substring-matchable<br/>within each deployment; prefix differs between them."]
+
+    classDef dep1style fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef dep2style fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef fileStyle fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A
+    classDef noteStyle fill:#FAEEDA,stroke:#854F0B,color:#412402
+    class sw1,r1,vm1a dep1style
+    class sw2,r2,vm1b dep2style
+    class mission_file fileStyle
+    class note noteStyle

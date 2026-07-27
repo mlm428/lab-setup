@@ -1,0 +1,70 @@
+%%{init: {'theme': 'neutral'}}%%
+classDiagram
+    class MissionSpec {
+        +str name
+        +dict networks
+        +dict~str,VMSpec~ vms
+        +dict placement
+        +str file_version
+        +gpu_vm_names() list
+        +total_nics() int
+    }
+    class VMSpec {
+        +str name
+        +VMType type
+        +int cpu
+        +int memory_mb
+        +dict~str,InterfaceSpec~ interfaces
+        +str image
+        +str image_revision
+        +str gpu_profile
+        +has_gpu bool
+        +interface_names() list
+    }
+    class InterfaceSpec {
+        +str network
+        +str mac_suffix
+    }
+    class HostSpec {
+        +str name
+        +int cpus
+        +int memory_mb
+        +str address
+        +list~GpuDeviceSpec~ gpu_devices
+        +available_profiles(exclude_uuids) dict
+    }
+    class GpuDeviceSpec {
+        +str profile
+        +str mdev_uuid
+    }
+    class MissionStatus {
+        +str mission_id
+        +str name
+        +MissionState state
+        +list~StepLogEntry~ steps
+        +str error
+        +MissionSpec spec
+        +str mac_prefix
+        +dict resolved_macs
+        +dict gpu_allocations
+    }
+    class MissionState {
+        <<enumeration>>
+        Pending
+        DeployingNetworks
+        CloningStorage
+        DefiningVMs
+        Validating
+        Running
+        Error
+        RollingBack
+        RolledBack
+        Destroying
+        Destroyed
+    }
+
+    MissionSpec "1" *-- "many" VMSpec
+    VMSpec "1" *-- "many" InterfaceSpec
+    HostSpec "1" *-- "many" GpuDeviceSpec
+    MissionStatus "1" o-- "0..1" MissionSpec : retains for teardown
+    MissionStatus --> MissionState

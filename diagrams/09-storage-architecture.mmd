@@ -1,0 +1,36 @@
+%%{init: {'theme': 'neutral'}}%%
+graph TB
+    subgraph golden_zone["Golden (source) images -- config/storage.yaml: golden.source"]
+        gl_local["ceph_rbd_local<br/>same cluster, different pool"]
+        gl_remote["ceph_rbd_remote<br/>separate Ceph cluster"]
+        gl_mount["mount<br/>plain filesystem / NFS export"]
+        catalog["images catalog:<br/>name + revision -> filename/snapshot"]
+    end
+
+    subgraph runtime_zone["Runtime pool -- config/storage.yaml: runtime"]
+        rt_ceph["ceph_rbd<br/>mission-runtime pool"]
+        rt_local["local_qcow2<br/>per-host fallback"]
+    end
+
+    clone_op["clone_within_cluster()<br/>true COW clone, thin-provisioned"]
+    copy_remote["copy_remote_image_to_pool()<br/>rbd export | rbd import (full copy)"]
+    copy_mount["copy_mount_image_to_pool()<br/>qemu-img convert (full copy)"]
+
+    catalog --> gl_local & gl_remote & gl_mount
+    gl_local --> clone_op --> rt_ceph
+    gl_remote --> copy_remote --> rt_ceph
+    gl_mount --> copy_mount --> rt_ceph
+    gl_mount --> copy_mount --> rt_local
+
+    vm["Linked-clone VM disk<br/>(never touches golden directly)"]
+    rt_ceph --> vm
+    rt_local --> vm
+
+    classDef golden fill:#FAECE7,stroke:#993C1D,color:#4A1B0C
+    classDef runtime fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef op fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A
+    classDef vmStyle fill:#EAF3DE,stroke:#3B6D11,color:#173404
+    class gl_local,gl_remote,gl_mount,catalog golden
+    class rt_ceph,rt_local runtime
+    class clone_op,copy_remote,copy_mount op
+    class vm vmStyle

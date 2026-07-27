@@ -1,0 +1,29 @@
+%%{init: {'theme': 'neutral'}}%%
+graph TD
+    config["Mission YAML: interfaces.control.mac_suffix = '10:00:00'<br/>(operator-supplied, stable across every deployment)"]
+
+    subgraph resolve["core/macs.py: resolve_mission_macs() -- runs once, at registration"]
+        prefix_gen["random_prefix()<br/>locally-administered-unicast bit set<br/>checked against every OTHER active deployment"]
+        suffix_use["use configured suffix,<br/>or random_suffix() if unset"]
+        combine["full MAC = prefix + suffix"]
+    end
+
+    dep1_mac["Deployment 1: AA:BB:CC:10:00:00"]
+    dep2_mac["Deployment 2: XX:YY:ZZ:10:00:00"]
+
+    config --> suffix_use
+    prefix_gen --> combine
+    suffix_use --> combine
+    combine --> dep1_mac
+    combine --> dep2_mac
+
+    legend["Suffix (last 3 octets): fixed by operator, matches in-guest<br/>substring-matching tooling within one deployment's L2 domain.<br/>Prefix (first 3 octets): random per deployment, guarantees<br/>isolation between concurrent deployments of the same mission."]
+
+    classDef inputStyle fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A
+    classDef procStyle fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef outStyle fill:#EAF3DE,stroke:#3B6D11,color:#173404
+    classDef noteStyle fill:#FAEEDA,stroke:#854F0B,color:#412402
+    class config inputStyle
+    class prefix_gen,suffix_use,combine procStyle
+    class dep1_mac,dep2_mac outStyle
+    class legend noteStyle

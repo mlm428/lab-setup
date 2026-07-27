@@ -1,0 +1,39 @@
+%%{init: {'theme': 'neutral'}}%%
+graph TD
+    start(["Fresh, STIG'd RHEL 9 host<br/>no initial setup"])
+
+    subgraph rescue_orch["rescue/orchestrate.py (external node, per host, sequential or parallel)"]
+        sync["rsync bootstrap/ + config/<br/>to host"]
+        ssh["SSH: sudo bootstrap.py --host NAME"]
+        centlog["write rescue/logs/HOST-TIMESTAMP.log"]
+    end
+
+    subgraph bootstrap_py["bootstrap.py orchestration (on the host)"]
+        pkgs["packages.py<br/>dnf install + enable services"]
+        libvirt["libvirt_checks.py<br/>libvirtd + default pool"]
+        net["networking.py<br/>OVS bridges + join OVN fabric"]
+        storage["storage.py<br/>Ceph RBD pool or local qcow2"]
+        gpu_step["gpu.py (if gpu_devices configured)<br/>IOMMU/VFIO + adapter discovery"]
+        cockpit["cockpit.py<br/>enable cockpit.socket"]
+        validate["validation.py<br/>final pass/fail check"]
+    end
+
+    result_ok(["Host ready<br/>exit 0"])
+    result_reboot(["Reboot required<br/>(IOMMU kernel args added)"])
+    result_fail(["Bootstrap failed<br/>exit 1/2, audit trail written"])
+
+    start --> sync --> ssh
+    ssh --> pkgs --> libvirt --> net --> storage --> gpu_step --> cockpit --> validate
+    ssh -.-> centlog
+    validate -->|"pass"| result_ok
+    gpu_step -->|"reboot flag set"| result_reboot
+    validate -->|"fail"| result_fail
+
+    classDef rescue fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef step fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef outcome fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A
+    classDef warn fill:#FAEEDA,stroke:#854F0B,color:#412402
+    class sync,ssh,centlog rescue
+    class pkgs,libvirt,net,storage,gpu_step,cockpit,validate step
+    class result_ok,result_fail outcome
+    class result_reboot warn
